@@ -10,75 +10,76 @@ from .worker_llm import WorkerLLMHandler
 
 
 class HeadLLMHandler(WorkerLLMHandler):
-    def __init__(self, llm_name: str, asset_dir: Path,
+    def __init__(self, llmName: str, assetDir: Path,
                  automation: AutomationHelper,
                  browser: BrowserController,
-                 event_queue: queue.Queue):
-        super().__init__(llm_name, asset_dir, automation, browser, event_queue)
+                 eventQueue: queue.Queue):
+        # ── 부모 클래스 초기화 (send_and_receive 등 공통 기능 상속) ───────────
+        super().__init__(llmName, assetDir, automation, browser, eventQueue)
 
-    def refine_prompt(self, user_prompt: str, worker_names: list) -> dict:
+    def refinePrompt(self, userPrompt: str, workerNames: list) -> dict:
         """사용자 프롬프트를 각 Worker LLM에 최적화된 형태로 변환.
         Head LLM이 JSON으로 응답; 파싱 실패 시 원본 프롬프트로 폴백."""
-        worker_list = ", ".join(worker_names)
-
-        # Head LLM에게 각 Worker별 키를 가진 JSON 응답 요청
-        json_template = "{" + ", ".join(
-            f'"{name}": "..."' for name in worker_names
+        # ── 정제 프롬프트 구성 ─────────────────────────────────────────────────
+        workerList = ", ".join(workerNames)
+        jsonTemplate = "{" + ", ".join(
+            f'"{name}": "..."' for name in workerNames
         ) + "}"
 
         prompt = REFINEMENT_TEMPLATE.format(
-            user_prompt=user_prompt,
-            worker_list=worker_list,
-            json_template=json_template,
+            user_prompt=userPrompt,
+            worker_list=workerList,
+            json_template=jsonTemplate,
         )
 
-        self._log(f"[Head: {self.llm_name}] 프롬프트 정제 요청 중...")
-        raw_response = self.send_and_receive(prompt)
+        # ── Head LLM에 전송 및 응답 수신 ─────────────────────────────────────
+        self._log(f"[Head: {self.llmName}] 프롬프트 정제 요청 중...")
+        rawResponse = self.sendAndReceive(prompt)
 
-        # JSON 파싱 시도
-        refined = self._parse_json(raw_response, worker_names)
+        # ── JSON 파싱 시도 ─────────────────────────────────────────────────────
+        refined = self._parseJson(rawResponse, workerNames)
         if refined:
-            self._log(f"[Head: {self.llm_name}] 정제된 프롬프트 수신 완료")
+            self._log(f"[Head: {self.llmName}] 정제된 프롬프트 수신 완료")
             return refined
 
-        # 파싱 실패 시 모든 Worker에 원본 프롬프트 사용
-        self._log(
-            f"[Head: {self.llm_name}] JSON 파싱 실패 → 원본 프롬프트로 대체"
-        )
-        return {name: user_prompt for name in worker_names}
+        # 파싱 실패 시 모든 Worker에 원본 프롬프트 사용 (graceful degradation)
+        self._log(f"[Head: {self.llmName}] JSON 파싱 실패 → 원본 프롬프트로 대체")
+        return {name: userPrompt for name in workerNames}
 
-    def synthesize(self, user_prompt: str, worker_results: dict) -> str:
+    def synthesize(self, userPrompt: str, workerResults: dict) -> str:
         """Worker 응답들을 종합하여 최종 답변 생성"""
-        worker_responses_text = "\n\n".join(
+        # ── 유효한 Worker 응답만 합산 ─────────────────────────────────────────
+        workerResponsesText = "\n\n".join(
             f"[{name.upper()}]\n{response}"
-            for name, response in worker_results.items()
+            for name, response in workerResults.items()
             if response and response != "[TIMEOUT]"
         )
 
-        if not worker_responses_text:
+        if not workerResponsesText:
             return "Worker LLM에서 유효한 응답을 받지 못했습니다."
 
+        # ── 종합 프롬프트 구성 및 전송 ────────────────────────────────────────
         prompt = SYNTHESIS_TEMPLATE.format(
-            user_prompt=user_prompt,
-            worker_responses=worker_responses_text,
+            user_prompt=userPrompt,
+            worker_responses=workerResponsesText,
         )
 
-        self._log(f"[Head: {self.llm_name}] 결과 종합 중...")
-        result = self.send_and_receive(prompt)
-        self._log(f"[Head: {self.llm_name}] 최종 답변 생성 완료")
+        self._log(f"[Head: {self.llmName}] 결과 종합 중...")
+        result = self.sendAndReceive(prompt)
+        self._log(f"[Head: {self.llmName}] 최종 답변 생성 완료")
         return result
 
-    def _parse_json(self, raw: str, worker_names: list) -> dict:
-        """LLM 응답에서 JSON 객체를 추출하여 파싱"""
-        # 1차 시도: 전체 응답을 JSON으로 직접 파싱
+    def _parseJson(self, raw: str, workerNames: list) -> dict:
+        """LLM 응답에서 JSON 객체를 추출하여 파싱 (2단계 폴백)"""
+        # ── 1차: 전체 응답을 JSON으로 직접 파싱 ─────────────────────────────
         try:
             data = json.loads(raw.strip())
-            if isinstance(data, dict) and any(k in data for k in worker_names):
+            if isinstance(data, dict) and any(k in data for k in workerNames):
                 return data
         except (json.JSONDecodeError, ValueError):
             pass
 
-        # 2차 시도: 첫 번째 { ... } 블록 추출 후 파싱
+        # ── 2차: 정규식으로 { ... } 블록 추출 후 파싱 ───────────────────────
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         if match:
             try:

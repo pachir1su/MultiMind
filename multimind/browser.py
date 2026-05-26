@@ -3,13 +3,13 @@ import time
 
 from .exceptions import BrowserWindowNotFoundError
 
+# ── LLM 사이트 URL 및 창 제목 키워드 ─────────────────────────────────────────
 LLM_URLS = {
     "claude": "https://claude.ai/new",
     "chatgpt": "https://chatgpt.com/",
     "gemini": "https://gemini.google.com/app",
 }
 
-# 창 제목에서 검색할 키워드
 LLM_WINDOW_KEYWORDS = {
     "claude": "Claude",
     "chatgpt": "ChatGPT",
@@ -20,27 +20,34 @@ OPEN_DELAY = 3.0
 
 
 class BrowserController:
-    def __init__(self, open_delay: float = OPEN_DELAY):
-        self.open_delay = open_delay
+    def __init__(self, openDelay: float = OPEN_DELAY):
+        # ── 인스턴스 설정 ──────────────────────────────────────────────────────
+        self.openDelay = openDelay
 
-    def open_tab(self, llm_name: str) -> None:
+    def openTab(self, llmName: str) -> None:
         """해당 LLM 사이트를 기본 브라우저의 새 탭으로 열기"""
-        url = LLM_URLS.get(llm_name)
+        # ── Windows: start 명령으로 기본 브라우저에 URL 전달 ─────────────────
+        url = LLM_URLS.get(llmName)
         if not url:
             return
-        # Windows: start 명령으로 기본 브라우저 실행
-        subprocess.Popen(["cmd", "/c", "start", "", url], shell=False)
-        time.sleep(self.open_delay)
+        try:
+            subprocess.Popen(["cmd", "/c", "start", "", url], shell=False)
+        except OSError as e:
+            raise BrowserWindowNotFoundError(llmName) from e
+        time.sleep(self.openDelay)
 
-    def open_all_tabs(self, llm_names: list) -> None:
+    def openAllTabs(self, llmNames: list) -> None:
         """여러 LLM 사이트를 순차적으로 새 탭으로 열기"""
-        for name in llm_names:
-            self.open_tab(name)
+        # ── 목록 순서대로 탭 오픈 ─────────────────────────────────────────────
+        for name in llmNames:
+            self.openTab(name)
 
-    def focus_tab(self, llm_name: str) -> bool:
+    def focusTab(self, llmName: str) -> bool:
         """해당 LLM의 브라우저 창을 포그라운드로 가져오기.
-        pygetwindow를 사용하고, 실패하면 Alt+Tab 폴백."""
-        keyword = LLM_WINDOW_KEYWORDS.get(llm_name, llm_name)
+        pygetwindow 성공 시 True, 실패 시 Alt+Tab 폴백 후 False."""
+        keyword = LLM_WINDOW_KEYWORDS.get(llmName, llmName)
+
+        # ── 1차: pygetwindow로 창 제목 검색 후 포커스 ────────────────────────
         try:
             import pygetwindow as gw
             windows = gw.getWindowsWithTitle(keyword)
@@ -54,8 +61,12 @@ class BrowserController:
         except Exception:
             pass
 
-        # pygetwindow 실패 시 Alt+Tab으로 순환 (폴백)
-        import pyautogui
-        pyautogui.hotkey("alt", "tab")
-        time.sleep(0.5)
+        # ── 2차 폴백: Alt+Tab으로 창 순환 ────────────────────────────────────
+        try:
+            import pyautogui
+            pyautogui.hotkey("alt", "tab")
+            time.sleep(0.5)
+        except Exception:
+            pass
+
         return False

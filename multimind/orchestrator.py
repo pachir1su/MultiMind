@@ -1,44 +1,53 @@
 import queue
 import threading
-import time
 from pathlib import Path
+
+import pyautogui
 
 from .automation import AutomationHelper
 from .browser import BrowserController
-from .config import ConfigManager
 from .head_llm import HeadLLMHandler
 from .worker_llm import WorkerLLMHandler
-from .logger import write_log
+from .logger import writeLog
 from .exceptions import ImageNotFoundError, ResponseTimeoutError, BrowserWindowNotFoundError
 
+# ── 상수 ──────────────────────────────────────────────────────────────────────
 ASSETS_DIR = Path("assets/screenshots")
-MAX_PARALLEL_TIMEOUT = 360  # 전체 Worker 병렬 실행 최대 대기 시간 (초)
+MAX_PARALLEL_TIMEOUT = 360  # Worker 병렬 실행 전체 최대 대기 시간 (초)
+
+FAILSAFE_MSG = (
+    "PyAutoGUI 페일세이프 동작: 실행 중 마우스를 화면 구석으로 이동하지 마세요.\n"
+    "프로그램을 다시 실행하고, 실행 중에는 마우스를 움직이지 마세요."
+)
 
 
 class Orchestrator:
-    def __init__(self, head: str, workers: list, user_prompt: str,
-                 event_queue: queue.Queue, settings: dict = None):
+    def __init__(self, head: str, workers: list, userPrompt: str,
+                 eventQueue: queue.Queue, settings: dict = None):
+        # ── 오케스트레이터 초기화 ──────────────────────────────────────────────
         self.head = head
         self.workers = workers
-        self.user_prompt = user_prompt
-        self.event_queue = event_queue
+        self.userPrompt = userPrompt
+        self.eventQueue = eventQueue
         self.settings = settings or {}
 
     def run(self) -> None:
         """오케스트레이션 전체 흐름 실행 (백그라운드 스레드에서 호출)"""
+        # ── 설정값 로드 ────────────────────────────────────────────────────────
         confidence = self.settings.get("image_confidence", 0.85)
-        poll_interval = self.settings.get("poll_interval", 0.5)
-        open_delay = self.settings.get("open_delay", 3.0)
+        pollInterval = self.settings.get("poll_interval", 0.5)
+        openDelay = self.settings.get("open_delay", 3.0)
 
-        automation = AutomationHelper(confidence=confidence, poll_interval=poll_interval)
-        browser = BrowserController(open_delay=open_delay)
+        # ── 핵심 객체 초기화 ───────────────────────────────────────────────────
+        automation = AutomationHelper(confidence=confidence, pollInterval=pollInterval)
+        browser = BrowserController(openDelay=openDelay)
 
-        head_handler = HeadLLMHandler(
-            self.head, ASSETS_DIR, automation, browser, self.event_queue
+        headHandler = HeadLLMHandler(
+            self.head, ASSETS_DIR, automation, browser, self.eventQueue
         )
-        worker_handlers = {
+        workerHandlers = {
             name: WorkerLLMHandler(
-                name, ASSETS_DIR, automation, browser, self.event_queue
+                name, ASSETS_DIR, automation, browser, self.eventQueue
             )
             for name in self.workers
         }
@@ -46,64 +55,64 @@ class Orchestrator:
         # ── Phase 1: Head LLM 프롬프트 정제 ──────────────────────────────────
         self._put({"type": "phase", "phase": 1,
                    "description": "Head LLM이 프롬프트를 정제 중..."})
-        write_log(f"Phase 1 시작 | Head={self.head} | Workers={self.workers}")
+        writeLog(f"Phase 1 시작 | Head={self.head} | Workers={self.workers}")
 
         try:
-            refined_prompts = head_handler.refine_prompt(
-                self.user_prompt, self.workers
-            )
-        except (ImageNotFoundError, ResponseTimeoutError,
-                BrowserWindowNotFoundError) as e:
+            refinedPrompts = headHandler.refinePrompt(self.userPrompt, self.workers)
+        except pyautogui.FailSafeException:
+            self._fatal(FAILSAFE_MSG)
+            return
+        except (ImageNotFoundError, ResponseTimeoutError, BrowserWindowNotFoundError) as e:
             self._fatal(str(e))
             return
         except Exception as e:
-            self._fatal(f"예상치 못한 오류: {e}")
+            self._fatal(f"Phase 1 예상치 못한 오류: {e}")
             return
 
-        # ── Phase 2: Worker LLM 병렬 실행 ────────────────────────────────────
+        # ── Phase 2: Worker LLM 병렬 실행 ─────────────────────────────────────
         self._put({"type": "phase", "phase": 2,
                    "description": "Worker LLM들이 응답 생성 중..."})
-        write_log("Phase 2 시작 | Worker 병렬 실행")
+        writeLog("Phase 2 시작 | Worker 병렬 실행")
 
-        worker_results = self._run_workers_parallel(
-            worker_handlers, refined_prompts
-        )
+        workerResults = self._runWorkersParallel(workerHandlers, refinedPrompts)
 
-        if not any(v and v != "[TIMEOUT]" for v in worker_results.values()):
+        if not any(v and v != "[TIMEOUT]" for v in workerResults.values()):
             self._fatal("모든 Worker LLM에서 유효한 응답을 받지 못했습니다.")
             return
 
-        # ── Phase 3: Head LLM 결과 종합 ──────────────────────────────────────
+        # ── Phase 3: Head LLM 결과 종합 ───────────────────────────────────────
         self._put({"type": "phase", "phase": 3,
                    "description": "Head LLM이 결과를 종합 중..."})
-        write_log("Phase 3 시작 | 결과 종합")
+        writeLog("Phase 3 시작 | 결과 종합")
 
         try:
-            final_answer = head_handler.synthesize(
-                self.user_prompt, worker_results
-            )
-        except (ImageNotFoundError, ResponseTimeoutError,
-                BrowserWindowNotFoundError) as e:
+            finalAnswer = headHandler.synthesize(self.userPrompt, workerResults)
+        except pyautogui.FailSafeException:
+            self._fatal(FAILSAFE_MSG)
+            return
+        except (ImageNotFoundError, ResponseTimeoutError, BrowserWindowNotFoundError) as e:
             self._fatal(str(e))
             return
         except Exception as e:
-            self._fatal(f"종합 중 오류: {e}")
+            self._fatal(f"Phase 3 예상치 못한 오류: {e}")
             return
 
-        write_log("오케스트레이션 완료")
-        self._put({"type": "final_result", "text": final_answer})
+        # ── 완료 처리 ──────────────────────────────────────────────────────────
+        writeLog("오케스트레이션 완료")
+        self._put({"type": "final_result", "text": finalAnswer})
 
-    def _run_workers_parallel(self, handlers: dict, prompts: dict) -> dict:
+    def _runWorkersParallel(self, handlers: dict, prompts: dict) -> dict:
         """모든 Worker에 병렬로 프롬프트 전송 후 결과 수집"""
+        # ── 스레드 생성 및 시작 ────────────────────────────────────────────────
         results = {}
-        results_lock = threading.Lock()
+        resultsLock = threading.Lock()
         threads = []
 
         for name, handler in handlers.items():
-            prompt = prompts.get(name, self.user_prompt)
+            prompt = prompts.get(name, self.userPrompt)
             t = threading.Thread(
-                target=self._worker_task,
-                args=(name, handler, prompt, results, results_lock),
+                target=self._workerTask,
+                args=(name, handler, prompt, results, resultsLock),
                 daemon=True,
             )
             threads.append(t)
@@ -111,34 +120,52 @@ class Orchestrator:
         for t in threads:
             t.start()
 
+        # ── 전체 완료 대기 ─────────────────────────────────────────────────────
         for t in threads:
             t.join(timeout=MAX_PARALLEL_TIMEOUT)
 
         return results
 
-    def _worker_task(self, name: str, handler: WorkerLLMHandler,
-                     prompt: str, results: dict, results_lock: threading.Lock) -> None:
-        """단일 Worker 스레드가 실행하는 작업"""
+    def _workerTask(self, name: str, handler: WorkerLLMHandler,
+                    prompt: str, results: dict, resultsLock: threading.Lock) -> None:
+        """단일 Worker 스레드 실행 로직"""
         try:
-            response = handler.send_and_receive(prompt)
-            with results_lock:
+            response = handler.sendAndReceive(prompt)
+            with resultsLock:
                 results[name] = response
             self._put({"type": "worker_done", "llm": name, "result": response})
-            write_log(f"Worker 완료: {name}")
+            writeLog(f"Worker 완료: {name}")
+
+        except pyautogui.FailSafeException:
+            # 페일세이프는 Worker 오류로 처리 (다른 Worker는 계속 실행)
+            with resultsLock:
+                results[name] = ""
+            self._put({"type": "worker_error", "llm": name, "error": FAILSAFE_MSG})
+            writeLog(f"Worker 페일세이프: {name}")
+
         except ResponseTimeoutError as e:
-            with results_lock:
+            with resultsLock:
                 results[name] = "[TIMEOUT]"
             self._put({"type": "worker_error", "llm": name, "error": str(e)})
-            write_log(f"Worker 타임아웃: {name}")
-        except Exception as e:
-            with results_lock:
+            writeLog(f"Worker 타임아웃: {name}")
+
+        except (ImageNotFoundError, BrowserWindowNotFoundError) as e:
+            with resultsLock:
                 results[name] = ""
             self._put({"type": "worker_error", "llm": name, "error": str(e)})
-            write_log(f"Worker 오류: {name} | {e}")
+            writeLog(f"Worker 오류: {name} | {e}")
+
+        except Exception as e:
+            with resultsLock:
+                results[name] = ""
+            self._put({"type": "worker_error", "llm": name, "error": f"예상치 못한 오류: {e}"})
+            writeLog(f"Worker 예외: {name} | {e}")
 
     def _put(self, event: dict) -> None:
-        self.event_queue.put(event)
+        """이벤트 큐에 메시지 전송"""
+        self.eventQueue.put(event)
 
     def _fatal(self, message: str) -> None:
-        write_log(f"치명적 오류: {message}")
+        """치명적 오류 처리 — 로그 기록 후 GUI에 알림"""
+        writeLog(f"치명적 오류: {message}")
         self._put({"type": "fatal_error", "error": message})
