@@ -107,10 +107,17 @@ _RESPONSE = {
 # 로그인 페이지로 판단하는 URL 키워드
 _LOGIN_URL_KEYWORDS = ["login", "signin", "sign-in", "auth", "accounts.google"]
 
+# CDP URL 매칭용 도메인 맵
+_LLM_DOMAINS = {
+    "claude": ["claude.ai"],
+    "chatgpt": ["chatgpt.com", "chat.openai.com"],
+    "gemini": ["gemini.google.com", "accounts.google.com"],
+}
+
 ELEMENT_WAIT  = 20
 STABLE_SECS   = 3
 RESPONSE_TIMEOUT = 300
-LOGIN_POLL_INTERVAL = 5   # 로그인 확인 주기 (초)
+LOGIN_POLL_INTERVAL = 10  # 로그인 확인 주기 (초)
 LOGIN_TIMEOUT  = 300      # 로그인 최대 대기 (초)
 
 
@@ -147,7 +154,7 @@ def _sync_cookies(log_fn=None) -> None:
 
     dst = Path(CHROME_PROFILE_DIR) / "Default"
     dst.mkdir(parents=True, exist_ok=True)
-    copied, failed = 0, 0
+    copied, failed_names = 0, []
 
     # Local State (쿠키 암호화 키 포함)
     src_ls = _CHROME_USER_DATA / "Local State"
@@ -157,7 +164,7 @@ def _sync_cookies(log_fn=None) -> None:
             shutil.copy2(str(src_ls), str(dst_ls))
             copied += 1
         except OSError:
-            failed += 1
+            failed_names.append("Local State")
 
     # 세션/쿠키 파일 (항상 최신으로 덮어씀)
     for fname in _SESSION_FILES:
@@ -168,7 +175,7 @@ def _sync_cookies(log_fn=None) -> None:
                 shutil.copy2(str(src_file), str(dst_file))
                 copied += 1
             except OSError:
-                failed += 1
+                failed_names.append(fname)
 
     # 세션 관련 디렉토리
     for dirname in ["Local Storage", "Session Storage"]:
@@ -181,7 +188,7 @@ def _sync_cookies(log_fn=None) -> None:
                 shutil.copytree(str(src_dir), str(dst_dir))
                 copied += 1
             except OSError:
-                failed += 1
+                failed_names.append(dirname)
 
     # Network 디렉토리 내 Cookies (최신 Chrome)
     src_net = src_default / "Network"
@@ -196,9 +203,12 @@ def _sync_cookies(log_fn=None) -> None:
                     shutil.copy2(str(src_file), str(dst_file))
                     copied += 1
                 except OSError:
-                    failed += 1
+                    failed_names.append(f"Network/{fname}")
 
-    _log(f"세션 파일 복사 완료: {copied}개 성공, {failed}개 실패")
+    msg = f"세션 파일 복사: {copied}개 성공"
+    if failed_names:
+        msg += f", {len(failed_names)}개 실패 ({', '.join(failed_names)})"
+    _log(msg)
 
 
 def _detect_chrome_version() -> Optional[int]:
@@ -339,19 +349,67 @@ class LLMDriver:
             self._log(f"[{name}] 탭 열림 — {self.driver.title}")
             time.sleep(1.5)
 
+    def _check_login_cdp(self, llm_names: list) -> Optional[list]:
+        """CDP로 탭 전환 없이 로그인 상태 확인. 로그인 필요한 LLM 목록 반환.
+        CDP 미지원 시 None 반환.
+        """
+        try:
+            targets = self.driver.execute_cdp_cmd("Target.getTargets", {})
+        except Exception:
+            return None
+
+        page_urls: dict[str, str] = {}
+        for info in targets.get("targetInfos", []):
+            if info.get("type") == "page":
+                url = info.get("url", "").lower()
+                for name, domains in _LLM_DOMAINS.items():
+                    if any(d in url for d in domains):
+                        page_urls[name] = url
+
+        pending = []
+        for name in llm_names:
+            url = page_urls.get(name, "")
+            if not url or any(k in url for k in _LOGIN_URL_KEYWORDS):
+                pending.append(name)
+        return pending
+
     def wait_for_login(self, llm_names: list) -> None:
-        """로그인이 필요한 LLM을 감지하고, 모두 로그인될 때까지 대기."""
+        """로그인이 필요한 LLM을 감지하고, 모두 로그인될 때까지 대기.
+        CDP를 사용하여 탭 전환 없이 URL만 확인 — 브라우저 깜빡임 방지.
+        """
         deadline = time.time() + LOGIN_TIMEOUT
-        while time.time() < deadline:
+
+        pending = self._check_login_cdp(llm_names)
+        if pending is None:
             pending = [n for n in llm_names if not self._check_logged_in(n)]
+
+        if not pending:
+            self._log("모든 LLM 로그인 확인 완료 ✓")
+            return
+
+        self._log(
+            f"로그인 필요: {', '.join(pending)}\n"
+            "  → 브라우저에서 직접 로그인해주세요. 자동으로 감지합니다.\n"
+            "  → 탭이 전환되지 않으니 편하게 로그인하세요."
+        )
+
+        last_status_log = time.time()
+        while time.time() < deadline:
+            time.sleep(LOGIN_POLL_INTERVAL)
+
+            pending = self._check_login_cdp(llm_names)
+            if pending is None:
+                pending = [n for n in llm_names if not self._check_logged_in(n)]
+
             if not pending:
                 self._log("모든 LLM 로그인 확인 완료 ✓")
                 return
-            self._log(
-                f"로그인 필요: {', '.join(pending)}\n"
-                "  → 브라우저 창에서 직접 로그인해주세요. 로그인하면 자동으로 계속됩니다."
-            )
-            time.sleep(LOGIN_POLL_INTERVAL)
+
+            now = time.time()
+            if now - last_status_log >= 30:
+                remaining = int(deadline - now)
+                self._log(f"로그인 대기 중: {', '.join(pending)} (남은 시간: {remaining}초)")
+                last_status_log = now
 
         self._log("⚠ 일부 LLM이 아직 로그인되지 않았습니다. 계속 진행합니다.")
 
