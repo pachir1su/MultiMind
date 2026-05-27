@@ -1,14 +1,10 @@
-REFINEMENT_TEMPLATE = """당신은 멀티 LLM 오케스트레이터의 Head LLM입니다.
-사용자의 원래 프롬프트를 받아서, 각 Worker LLM에게 최적화된 세부 프롬프트를 생성해주세요.
+REFINEMENT_TEMPLATE = """다음 프롬프트를 각 Worker LLM에 맞게 최적화하세요.
+설명·인사·사족 없이 JSON만 출력하세요.
 
-원래 프롬프트:
-{user_prompt}
+프롬프트: {user_prompt}
+Workers: {worker_list}
 
-다음 Worker LLM들이 이 작업을 처리합니다: {worker_list}
-
-각 LLM의 특성에 맞게 프롬프트를 조정하되, 핵심 목표는 동일하게 유지하세요.
-반드시 아래 JSON 형식으로만 응답하세요 (JSON 이외의 텍스트 금지):
-
+정확히 이 형식으로 출력 (JSON 외 텍스트 절대 금지):
 {json_template}"""
 
 SYNTHESIS_TEMPLATE = """당신은 멀티 LLM 오케스트레이터의 Head LLM입니다.
