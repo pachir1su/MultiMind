@@ -1,10 +1,11 @@
 import queue
 import threading
+import time
 
 from .llm_driver import LLMDriver
 from .head_llm import HeadLLMHandler
 from .worker_llm import WorkerLLMHandler
-from .logger import write_log
+from .logger import write_log, SessionLogger
 from .exceptions import LLMDriverError, MissingDependencyError, ResponseTimeoutError
 
 MAX_WORKER_TIMEOUT = 360
@@ -18,6 +19,7 @@ class Orchestrator:
         self.user_prompt = user_prompt
         self.event_queue = event_queue
         self.settings = settings or {}
+        self.session_log = SessionLogger(head, workers, user_prompt)
 
     def run(self) -> None:
         """오케스트레이션 전체 흐름 실행 (백그라운드 스레드에서 호출)"""
@@ -61,6 +63,12 @@ class Orchestrator:
             except Exception as e:
                 self._fatal(f"예상치 못한 오류: {e}"); return
 
+            self.session_log.log_refinement(
+                head_handler.last_sent_prompt,
+                head_handler.last_raw_response,
+                refined_prompts,
+            )
+
             # ── Phase 2: Worker LLM 병렬 실행 ────────────────────────────────
             self._put({"type": "phase", "phase": 2,
                        "description": "Worker LLM들이 응답 생성 중..."})
@@ -88,10 +96,20 @@ class Orchestrator:
             except Exception as e:
                 self._fatal(f"종합 중 오류: {e}"); return
 
+            self.session_log.log_synthesis(
+                head_handler.last_sent_prompt,
+                final_answer,
+            )
+
             write_log("오케스트레이션 완료")
             self._put({"type": "final_result", "text": final_answer})
 
         finally:
+            log_path = self.session_log.save()
+            if log_path:
+                write_log(f"세션 로그 저장: {log_path}")
+                self._put({"type": "log",
+                           "message": f"세션 로그 저장됨: {log_path}"})
             driver.quit()
 
     def _run_workers_parallel(self, handlers: dict, prompts: dict) -> dict:
@@ -120,26 +138,40 @@ class Orchestrator:
                 self._put({"type": "worker_error", "llm": name,
                            "error": f"전체 타임아웃 ({MAX_WORKER_TIMEOUT}s)"})
                 write_log(f"Worker 전체 타임아웃: {name}")
+                self.session_log.log_worker(
+                    name, prompts.get(name, self.user_prompt),
+                    error=f"전체 타임아웃 ({MAX_WORKER_TIMEOUT}s)",
+                )
 
         return results
 
     def _worker_task(self, name: str, handler: WorkerLLMHandler,
                      prompt: str, results: dict,
                      results_lock: threading.Lock) -> None:
+        start = time.time()
         try:
             response = handler.send_and_receive(prompt)
+            duration = time.time() - start
             with results_lock:
                 results[name] = response
+            self.session_log.log_worker(name, prompt, response=response,
+                                        duration=duration)
             self._put({"type": "worker_done", "llm": name, "result": response})
             write_log(f"Worker 완료: {name}")
         except ResponseTimeoutError as e:
+            duration = time.time() - start
             with results_lock:
                 results[name] = "[TIMEOUT]"
+            self.session_log.log_worker(name, prompt, error=str(e),
+                                        duration=duration)
             self._put({"type": "worker_error", "llm": name, "error": str(e)})
             write_log(f"Worker 타임아웃: {name}")
         except Exception as e:
+            duration = time.time() - start
             with results_lock:
                 results[name] = ""
+            self.session_log.log_worker(name, prompt, error=str(e),
+                                        duration=duration)
             self._put({"type": "worker_error", "llm": name, "error": str(e)})
             write_log(f"Worker 오류: {name} | {e}")
 
@@ -148,4 +180,5 @@ class Orchestrator:
 
     def _fatal(self, message: str) -> None:
         write_log(f"치명적 오류: {message}")
+        self.session_log.log_error(message)
         self._put({"type": "fatal_error", "error": message})
