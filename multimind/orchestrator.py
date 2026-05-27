@@ -3,6 +3,8 @@ import threading
 import time
 from pathlib import Path
 
+import pyautogui
+
 from .automation import AutomationHelper
 from .browser import BrowserController
 from .config import ConfigManager
@@ -10,6 +12,12 @@ from .head_llm import HeadLLMHandler
 from .worker_llm import WorkerLLMHandler
 from .logger import write_log
 from .exceptions import ImageNotFoundError, ResponseTimeoutError, BrowserWindowNotFoundError
+
+_FAILSAFE_MSG = (
+    "PyAutoGUI 페일세이프가 작동했습니다.\n"
+    "마우스가 화면 모서리로 이동하면 자동으로 중단됩니다.\n"
+    "마우스를 화면 중앙으로 옮긴 뒤 다시 실행해주세요."
+)
 
 ASSETS_DIR = Path("assets/screenshots")
 MAX_PARALLEL_TIMEOUT = 360  # 전체 Worker 병렬 실행 최대 대기 시간 (초)
@@ -56,6 +64,9 @@ class Orchestrator:
                 BrowserWindowNotFoundError) as e:
             self._fatal(str(e))
             return
+        except pyautogui.FailSafeException:
+            self._fatal(_FAILSAFE_MSG)
+            return
         except Exception as e:
             self._fatal(f"예상치 못한 오류: {e}")
             return
@@ -85,6 +96,9 @@ class Orchestrator:
         except (ImageNotFoundError, ResponseTimeoutError,
                 BrowserWindowNotFoundError) as e:
             self._fatal(str(e))
+            return
+        except pyautogui.FailSafeException:
+            self._fatal(_FAILSAFE_MSG)
             return
         except Exception as e:
             self._fatal(f"종합 중 오류: {e}")
@@ -139,6 +153,11 @@ class Orchestrator:
                 results[name] = "[TIMEOUT]"
             self._put({"type": "worker_error", "llm": name, "error": str(e)})
             write_log(f"Worker 타임아웃: {name}")
+        except pyautogui.FailSafeException:
+            with results_lock:
+                results[name] = ""
+            self._put({"type": "worker_error", "llm": name, "error": _FAILSAFE_MSG})
+            write_log(f"Worker 페일세이프: {name}")
         except Exception as e:
             with results_lock:
                 results[name] = ""
