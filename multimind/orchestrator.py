@@ -32,10 +32,9 @@ class Orchestrator:
                        "description": "Chrome 브라우저 시작 중..."})
             driver.start()
             driver.open_tabs(all_llms)
-            self._put({"type": "log",
-                       "message": "모든 탭 열림. 로그인이 필요하면 지금 로그인 후 잠시 기다려주세요."})
-            time_sleep = self.settings.get("login_wait", 5)
-            import time; time.sleep(time_sleep)
+
+            # 로그인 필요 여부 자동 감지 후 대기
+            driver.wait_for_login(all_llms)
 
             head_handler = HeadLLMHandler(self.head, driver, self.event_queue)
             worker_handlers = {
