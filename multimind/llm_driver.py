@@ -114,26 +114,6 @@ LOGIN_POLL_INTERVAL = 5   # 로그인 확인 주기 (초)
 LOGIN_TIMEOUT  = 300      # 로그인 최대 대기 (초)
 
 
-def _is_chrome_running() -> bool:
-    """Chrome 브라우저 프로세스가 실행 중인지 확인."""
-    if sys.platform == "win32":
-        try:
-            result = subprocess.run(
-                ["tasklist", "/FI", "IMAGENAME eq chrome.exe", "/NH"],
-                capture_output=True, text=True, timeout=10,
-            )
-            return "chrome.exe" in result.stdout.lower()
-        except Exception:
-            return False
-    try:
-        result = subprocess.run(
-            ["pgrep", "-x", "chrome"], capture_output=True, timeout=10,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
 _SESSION_FILES = [
     "Cookies", "Cookies-journal",
     "Login Data", "Login Data-journal", "Login Data For Account",
@@ -253,19 +233,10 @@ class LLMDriver:
             )
 
         version_main = _detect_chrome_version()
-        chrome_running = _is_chrome_running()
+        if version_main:
+            self._log(f"Chrome 버전 {version_main} 감지됨")
 
-        if chrome_running:
-            user_data_dir = CHROME_PROFILE_DIR
-            Path(CHROME_PROFILE_DIR).mkdir(parents=True, exist_ok=True)
-            self._log("Chrome이 실행 중 — 별도 프로필로 시작합니다")
-            self._log("기존 Chrome 세션 파일 복사 중...")
-            _sync_cookies()
-        else:
-            user_data_dir = str(_CHROME_USER_DATA)
-            self._log("기존 Chrome 프로필 사용 (로그인 세션 유지)")
-
-        def _build_options(data_dir=user_data_dir):
+        def _build_options(data_dir):
             opts = uc.ChromeOptions()
             opts.add_argument(f"--user-data-dir={data_dir}")
             opts.add_argument("--profile-directory=Default")
@@ -273,56 +244,67 @@ class LLMDriver:
             opts.add_argument("--no-default-browser-check")
             return opts
 
+        def _try_launch(data_dir, ver=version_main):
+            kwargs = dict(options=_build_options(data_dir), use_subprocess=True)
+            if ver:
+                kwargs["version_main"] = ver
+            return uc.Chrome(**kwargs)
+
+        # 1차: 기존 Chrome 프로필 직접 사용
+        self._log("기존 Chrome 프로필로 시작 중...")
         try:
-            kwargs = dict(options=_build_options(), use_subprocess=True)
-            if version_main:
-                kwargs["version_main"] = version_main
-                self._log(f"Chrome 버전 {version_main} 감지됨")
-            self.driver = uc.Chrome(**kwargs)
-        except Exception as e:
-            parsed_ver = _parse_version_from_error(str(e))
+            self.driver = _try_launch(str(_CHROME_USER_DATA))
+            self._log("기존 Chrome 프로필 연결 성공 (로그인 세션 유지)")
+        except Exception as first_err:
+            self.driver = None
+            # 버전 불일치면 버전 맞춰 재시도
+            parsed_ver = _parse_version_from_error(str(first_err))
             if parsed_ver and parsed_ver != version_main:
-                self._log(f"드라이버 버전 불일치 — Chrome {parsed_ver}에 맞춰 재시도 중...")
+                self._log(f"드라이버 버전 불일치 — Chrome {parsed_ver}에 맞춰 재시도...")
                 try:
-                    self.driver = uc.Chrome(
-                        options=_build_options(),
-                        use_subprocess=True,
-                        version_main=parsed_ver,
-                    )
-                except Exception as e2:
-                    raise LLMDriverError("chrome", f"Chrome 시작 실패: {e2}")
-            elif not chrome_running:
-                self._log("기존 프로필 사용 실패 — 별도 프로필로 재시도...")
+                    self.driver = _try_launch(str(_CHROME_USER_DATA), parsed_ver)
+                    version_main = parsed_ver
+                except Exception:
+                    pass
+
+            # 2차: 별도 프로필 + 세션 복사
+            if self.driver is None:
+                self._log(
+                    "기존 프로필 사용 불가 (Chrome이 실행 중일 수 있음)\n"
+                    "  → 별도 프로필로 시작합니다. 로그인이 필요할 수 있습니다.\n"
+                    "  → 팁: Chrome을 완전히 종료(시스템 트레이 포함)한 후 실행하면 자동 로그인됩니다."
+                )
                 Path(CHROME_PROFILE_DIR).mkdir(parents=True, exist_ok=True)
                 _sync_cookies()
                 try:
-                    fallback_kwargs = dict(
-                        options=_build_options(CHROME_PROFILE_DIR),
-                        use_subprocess=True,
+                    self.driver = _try_launch(
+                        CHROME_PROFILE_DIR, parsed_ver or version_main
                     )
-                    if version_main:
-                        fallback_kwargs["version_main"] = version_main
-                    self.driver = uc.Chrome(**fallback_kwargs)
                 except Exception as e2:
                     raise LLMDriverError("chrome", f"Chrome 시작 실패: {e2}")
-            else:
-                raise LLMDriverError("chrome", f"Chrome 시작 실패: {e}")
 
         self.driver.set_page_load_timeout(60)
         self._log("Chrome 시작됨 (봇 감지 우회 활성화)")
 
     def open_tabs(self, llm_names: list) -> None:
-        """각 LLM을 새 탭으로 열기"""
+        """각 LLM을 새 탭으로 열기 (페이지 로드 완료 대기)"""
         for i, name in enumerate(llm_names):
             url = LLM_URLS[name]
             if i == 0:
                 self.driver.get(url)
             else:
                 self.driver.execute_script(f"window.open('{url}', '_blank');")
+                time.sleep(1.0)
                 self.driver.switch_to.window(self.driver.window_handles[-1])
             self._tabs[name] = self.driver.current_window_handle
-            self._log(f"[{name}] 탭 열림")
-            time.sleep(2.0)
+            try:
+                WebDriverWait(self.driver, 20).until(
+                    lambda d: d.execute_script("return document.readyState") == "complete"
+                )
+            except (TimeoutException, Exception):
+                pass
+            self._log(f"[{name}] 탭 열림 — {self.driver.title}")
+            time.sleep(1.0)
 
     def wait_for_login(self, llm_names: list) -> None:
         """로그인이 필요한 LLM을 감지하고, 모두 로그인될 때까지 대기."""
