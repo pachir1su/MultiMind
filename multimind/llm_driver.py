@@ -143,8 +143,8 @@ def _is_profile_locked() -> bool:
 
 
 def _sync_cookies(log_fn=None) -> None:
-    """기존 Chrome 프로필의 세션 데이터를 MultiMind 전용 프로필로 복사.
-    항상 최신 데이터로 덮어씀. 복사 결과를 로그로 출력.
+    """메인 Chrome 세션을 MultiMind 전용 프로필로 복사 (최초 1회만).
+    이미 세션이 존재하면 기존 로그인을 보존하기 위해 건너뜀.
     """
     _log = log_fn or (lambda m: None)
     src_default = _CHROME_USER_DATA / "Default"
@@ -153,6 +153,14 @@ def _sync_cookies(log_fn=None) -> None:
         return
 
     dst = Path(CHROME_PROFILE_DIR) / "Default"
+
+    # 이미 세션 데이터가 있으면 덮어쓰지 않음 (이전 로그인 보존)
+    if (dst / "Cookies").exists() or (dst / "Network" / "Cookies").exists():
+        _log("기존 MultiMind 세션 유지 (이전 로그인 보존)")
+        return
+
+    # 최초 실행: 메인 Chrome에서 세션 복사
+    _log("최초 세션 복사 중 (메인 Chrome에서 복사)...")
     dst.mkdir(parents=True, exist_ok=True)
     copied, failed_names = 0, []
 
