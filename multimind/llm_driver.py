@@ -62,8 +62,11 @@ _INPUT = {
         'div[contenteditable="true"]',
     ],
     "gemini":  [
+        "div.ql-editor.textarea",
         "div.ql-editor",
         'rich-textarea div[contenteditable="true"]',
+        'div[contenteditable="true"][aria-label*="rompt"]',
+        'div[contenteditable="true"][aria-label*="essage"]',
         'div[contenteditable="true"]',
     ],
 }
@@ -81,7 +84,9 @@ _SEND = {
     ],
     "gemini":  [
         'button[aria-label="Send message"]',
+        'button[aria-label="메시지 전송"]',
         "button.send-button",
+        'button[data-testid="send-button"]',
     ],
 }
 
@@ -101,9 +106,11 @@ _RESPONSE = {
         "article .markdown",
     ],
     "gemini":  [
+        "model-response .response-content",
         "model-response",
-        ".response-content",
+        "message-content .text-content",
         "message-content",
+        ".response-content",
         ".model-response-text",
     ],
 }
@@ -123,6 +130,58 @@ STABLE_SECS   = 3
 RESPONSE_TIMEOUT = 300
 LOGIN_POLL_INTERVAL = 10  # 로그인 확인 주기 (초)
 LOGIN_TIMEOUT  = 300      # 로그인 최대 대기 (초)
+
+# Shadow DOM을 관통하여 입력 요소를 찾고 텍스트를 설정하는 JS
+_JS_SET_TEXT = """
+var text = arguments[0];
+function findInput() {
+    var rt = document.querySelector('rich-textarea');
+    if (rt) {
+        var root = rt.shadowRoot || rt;
+        var ed = root.querySelector('.ql-editor')
+              || root.querySelector('[contenteditable="true"]');
+        if (ed) return ed;
+    }
+    var sels = ['div.ql-editor', '#prompt-textarea',
+                'div.ProseMirror[contenteditable="true"]',
+                '[contenteditable="true"][aria-label]',
+                'div[contenteditable="true"]'];
+    for (var s of sels) {
+        var el = document.querySelector(s);
+        if (el && el.offsetParent !== null) return el;
+    }
+    return null;
+}
+var input = findInput();
+if (!input) return false;
+input.focus();
+input.innerHTML = '';
+document.execCommand('insertText', false, text);
+input.dispatchEvent(new Event('input', {bubbles: true}));
+return true;
+"""
+
+_JS_CLICK_SEND = """
+var sels = ['button[aria-label="Send message"]',
+            'button[aria-label="Send Message"]',
+            'button[aria-label="메시지 전송"]',
+            'button.send-button',
+            'button[data-testid="send-button"]',
+            'button[data-testid="send-message-button"]'];
+for (var s of sels) {
+    var btn = document.querySelector(s);
+    if (btn && !btn.disabled) { btn.click(); return true; }
+}
+var buttons = document.querySelectorAll('button[aria-label]');
+for (var b of buttons) {
+    var label = (b.getAttribute('aria-label') || '').toLowerCase();
+    if ((label.includes('send') || label.includes('전송'))
+        && !b.disabled && b.offsetParent !== null) {
+        b.click(); return true;
+    }
+}
+return false;
+"""
 
 
 _SESSION_FILES = [
@@ -456,43 +515,68 @@ class LLMDriver:
     # ── 핵심 작업 ──────────────────────────────────────────────────────────────
 
     def send_prompt(self, llm_name: str, prompt: str) -> None:
-        """프롬프트 입력 및 전송 (직렬화)"""
+        """프롬프트 입력 및 전송 (직렬화, CSS → JS 폴백 → 새로고침 재시도)"""
         with self._send_lock:
             self.switch_to(llm_name)
 
-            input_el = self._find_any(_INPUT[llm_name], ELEMENT_WAIT)
-            if input_el is None:
-                self._log(f"[{llm_name}] 입력창 미발견 — 새로고침 후 재시도")
-                self.driver.refresh()
-                time.sleep(3)
-                input_el = self._find_any(_INPUT[llm_name], 30)
-            if input_el is None:
-                raise LLMDriverError(
-                    llm_name,
-                    "입력창을 찾을 수 없습니다. 해당 LLM 탭에서 로그인되어 있는지 확인하세요."
-                )
-
-            input_el.click()
-            time.sleep(0.3)
-            input_el.send_keys(Keys.CONTROL, "a")
-            time.sleep(0.1)
-            input_el.send_keys(Keys.DELETE)
-            time.sleep(0.1)
-
-            pyperclip.copy(prompt)
-            input_el.send_keys(Keys.CONTROL, "v")
-            time.sleep(0.5)
-
-            send_el = self._find_any(_SEND[llm_name], 10)
-            if send_el:
+            for attempt in range(2):
                 try:
-                    send_el.click()
-                except Exception:
-                    input_el.send_keys(Keys.RETURN)
-            else:
-                input_el.send_keys(Keys.RETURN)
+                    self._do_send(llm_name, prompt)
+                    self._log(f"[{llm_name}] 전송 완료")
+                    return
+                except (NoSuchElementException, StaleElementReferenceException):
+                    if attempt == 0:
+                        self._log(f"[{llm_name}] 요소 접근 실패 — JS 폴백 시도")
+                        if self._do_send_js(llm_name, prompt):
+                            self._log(f"[{llm_name}] JS 전송 완료")
+                            return
+                        self._log(f"[{llm_name}] JS 폴백 실패 — 새로고침 후 재시도")
+                        self.driver.refresh()
+                        time.sleep(3)
 
-            self._log(f"[{llm_name}] 전송 완료")
+            raise LLMDriverError(
+                llm_name,
+                "입력창을 찾을 수 없습니다. 해당 LLM 탭에서 로그인되어 있는지 확인하세요."
+            )
+
+    def _do_send(self, llm_name: str, prompt: str) -> None:
+        """CSS 셀렉터 기반 프롬프트 전송"""
+        input_el = self._find_any(_INPUT[llm_name], ELEMENT_WAIT)
+        if input_el is None:
+            raise NoSuchElementException("입력창 미발견")
+
+        input_el.click()
+        time.sleep(0.3)
+        input_el.send_keys(Keys.CONTROL, "a")
+        time.sleep(0.1)
+        input_el.send_keys(Keys.DELETE)
+        time.sleep(0.1)
+
+        pyperclip.copy(prompt)
+        input_el.send_keys(Keys.CONTROL, "v")
+        time.sleep(0.5)
+
+        send_el = self._find_any(_SEND[llm_name], 10)
+        if send_el:
+            try:
+                send_el.click()
+            except Exception:
+                input_el.send_keys(Keys.RETURN)
+        else:
+            input_el.send_keys(Keys.RETURN)
+
+    def _do_send_js(self, llm_name: str, prompt: str) -> bool:
+        """JavaScript 기반 프롬프트 전송 (Shadow DOM 대응)"""
+        try:
+            if not self.driver.execute_script(_JS_SET_TEXT, prompt):
+                return False
+            time.sleep(0.5)
+            if not self.driver.execute_script(_JS_CLICK_SEND):
+                from selenium.webdriver.common.action_chains import ActionChains
+                ActionChains(self.driver).send_keys(Keys.RETURN).perform()
+            return True
+        except Exception:
+            return False
 
     def wait_response(self, llm_name: str,
                       timeout: int = RESPONSE_TIMEOUT,
