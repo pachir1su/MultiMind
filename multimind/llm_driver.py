@@ -588,7 +588,15 @@ class LLMDriver:
         input_el.send_keys(Keys.CONTROL, "v")
         time.sleep(0.5)
 
-        # 전송 버튼: CSS → JS 폴백으로 탐색
+        # Gemini: CDP Enter 키로 전송 (버튼 클릭이 Gemini에서 작동 안 함)
+        if llm_name == "gemini":
+            input_el.click()
+            time.sleep(0.2)
+            if not self._send_enter_cdp():
+                input_el.send_keys(Keys.RETURN)
+            return
+
+        # 기타 LLM: 전송 버튼 클릭
         send_el = self._find_any(_SEND[llm_name], 10)
         if send_el is None:
             send_el = self.driver.execute_script(_JS_FIND_SEND)
@@ -603,27 +611,33 @@ class LLMDriver:
             input_el.send_keys(Keys.RETURN)
 
     def _do_send_js(self, llm_name: str, prompt: str) -> bool:
-        """JavaScript 텍스트 입력 + Selenium trusted 클릭 전송"""
+        """JavaScript 텍스트 입력 + 전송"""
         try:
             if not self.driver.execute_script(_JS_SET_TEXT, prompt):
                 return False
             time.sleep(1.0)
 
+            # Gemini: CDP Enter 키로 전송
+            if llm_name == "gemini":
+                if self._send_enter_cdp():
+                    return True
+                from selenium.webdriver.common.action_chains import ActionChains
+                ActionChains(self.driver).send_keys(Keys.RETURN).perform()
+                return True
+
             from selenium.webdriver.common.action_chains import ActionChains
 
-            # JS로 전송 버튼을 찾고, Selenium ActionChains로 클릭 (trusted event)
+            # 기타 LLM: 전송 버튼 클릭
             sendBtn = self.driver.execute_script(_JS_FIND_SEND)
             if sendBtn:
                 ActionChains(self.driver).move_to_element(sendBtn).pause(0.3).click().perform()
                 return True
 
-            # CSS 셀렉터로 전송 버튼 재시도
             sendEl = self._find_any(_SEND.get(llm_name, []), 5)
             if sendEl:
                 ActionChains(self.driver).move_to_element(sendEl).pause(0.3).click().perform()
                 return True
 
-            # 최종 폴백: Enter 키
             ActionChains(self.driver).send_keys(Keys.RETURN).perform()
             return True
         except Exception:
@@ -690,6 +704,28 @@ class LLMDriver:
             self.driver = None
 
     # ── 내부 헬퍼 ──────────────────────────────────────────────────────────────
+
+    def _send_enter_cdp(self) -> bool:
+        """Chrome DevTools Protocol로 Enter 키 전송 (OS 레벨 입력)"""
+        try:
+            self.driver.execute_cdp_cmd('Input.dispatchKeyEvent', {
+                'type': 'keyDown',
+                'key': 'Enter',
+                'code': 'Enter',
+                'windowsVirtualKeyCode': 13,
+                'nativeVirtualKeyCode': 13,
+            })
+            time.sleep(0.05)
+            self.driver.execute_cdp_cmd('Input.dispatchKeyEvent', {
+                'type': 'keyUp',
+                'key': 'Enter',
+                'code': 'Enter',
+                'windowsVirtualKeyCode': 13,
+                'nativeVirtualKeyCode': 13,
+            })
+            return True
+        except Exception:
+            return False
 
     def _check_logged_in(self, llm_name: str) -> bool:
         """해당 LLM 탭이 로그인된 상태인지 확인"""
