@@ -107,11 +107,9 @@ class MultiMindApp:
         self.status_label = ttk.Label(frame, text="", foreground="#555555")
         self.status_label.grid(row=0, column=0, sticky="w")
 
-        ttk.Button(frame, text="⚙ 이미지 재캡처",
-                   command=self._on_setup_clicked).grid(row=0, column=1, padx=(0, 8))
         self.run_button = ttk.Button(frame, text="▶  실행",
                                      command=self._on_run_clicked)
-        self.run_button.grid(row=0, column=2)
+        self.run_button.grid(row=0, column=1)
 
     def _build_output_section(self, parent):
         frame = ttk.LabelFrame(parent, text="최종 합성 결과", padding="8")
@@ -168,13 +166,6 @@ class MultiMindApp:
                 cb.configure(state="disabled")
             else:
                 cb.configure(state="normal")
-
-    def _on_setup_clicked(self):
-        import sys
-        import os
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from setup_assets import run_wizard
-        run_wizard()
 
     def _on_run_clicked(self):
         prompt = self.prompt_text.get("1.0", "end").strip()
