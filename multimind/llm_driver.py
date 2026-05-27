@@ -12,17 +12,22 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-import undetected_chromedriver as uc
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.keys import Keys
-from selenium.common.exceptions import (
-    TimeoutException, NoSuchElementException, StaleElementReferenceException,
-)
-import pyperclip
+from .exceptions import LLMDriverError, MissingDependencyError, ResponseTimeoutError
 
-from .exceptions import LLMDriverError, ResponseTimeoutError
+_IMPORT_ERROR: Optional[str] = None
+
+try:
+    import undetected_chromedriver as uc
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.common.keys import Keys
+    from selenium.common.exceptions import (
+        TimeoutException, NoSuchElementException, StaleElementReferenceException,
+    )
+    import pyperclip
+except ModuleNotFoundError as _e:
+    _IMPORT_ERROR = str(_e)
 
 # ── 프로필 경로 ────────────────────────────────────────────────────────────────
 if sys.platform == "win32":
@@ -143,13 +148,19 @@ class LLMDriver:
     def __init__(self, log_fn=None):
         self._log = log_fn or (lambda m: None)
         self._send_lock = threading.Lock()
-        self.driver: Optional[uc.Chrome] = None
+        self.driver = None  # uc.Chrome when running
         self._tabs: dict[str, str] = {}
 
     # ── 초기화 ─────────────────────────────────────────────────────────────────
 
     def start(self) -> None:
         """Chrome 시작 (봇 감지 우회 + 기존 세션 복사)"""
+        if _IMPORT_ERROR is not None:
+            pkg = _IMPORT_ERROR.replace("No module named ", "").strip("'\"")
+            raise MissingDependencyError(
+                pkg,
+                "pip install selenium undetected-chromedriver pyperclip",
+            )
         Path(CHROME_PROFILE_DIR).mkdir(parents=True, exist_ok=True)
 
         self._log("기존 Chrome 세션 파일 복사 중...")

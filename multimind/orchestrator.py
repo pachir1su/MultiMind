@@ -5,7 +5,7 @@ from .llm_driver import LLMDriver
 from .head_llm import HeadLLMHandler
 from .worker_llm import WorkerLLMHandler
 from .logger import write_log
-from .exceptions import LLMDriverError, ResponseTimeoutError
+from .exceptions import LLMDriverError, MissingDependencyError, ResponseTimeoutError
 
 MAX_WORKER_TIMEOUT = 360
 
@@ -30,11 +30,16 @@ class Orchestrator:
             # Chrome 시작 및 탭 열기
             self._put({"type": "phase", "phase": 0,
                        "description": "Chrome 브라우저 시작 중..."})
-            driver.start()
-            driver.open_tabs(all_llms)
-
-            # 로그인 필요 여부 자동 감지 후 대기
-            driver.wait_for_login(all_llms)
+            try:
+                driver.start()
+                driver.open_tabs(all_llms)
+                driver.wait_for_login(all_llms)
+            except MissingDependencyError as e:
+                self._fatal(str(e)); return
+            except LLMDriverError as e:
+                self._fatal(str(e)); return
+            except Exception as e:
+                self._fatal(f"Chrome 시작 실패: {e}"); return
 
             head_handler = HeadLLMHandler(self.head, driver, self.event_queue)
             worker_handlers = {
