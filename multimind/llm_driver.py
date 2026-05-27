@@ -1,44 +1,48 @@
 """
-Selenium Chrome 기반 LLM 드라이버.
-각 LLM 사이트를 새 탭으로 열고 DOM 요소를 직접 제어합니다.
-이미지 매칭 불필요 — CSS 셀렉터로 입력창/버튼을 찾습니다.
+undetected-chromedriver 기반 LLM 드라이버.
+- Cloudflare / 봇 감지 우회
+- 기존 Chrome 프로필 쿠키 복사 → 로그인 세션 재사용
+- 기존 Chrome이 열려 있든 없든 독립 실행
 """
 import os
 import sys
 import time
+import shutil
 import threading
 from pathlib import Path
 from typing import Optional
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
+import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import (
-    TimeoutException, NoSuchElementException, WebDriverException,
-    StaleElementReferenceException,
+    TimeoutException, NoSuchElementException, StaleElementReferenceException,
 )
 import pyperclip
 
 from .exceptions import LLMDriverError, ResponseTimeoutError
 
-# ── Chrome 전용 프로필 (메인 Chrome과 충돌 방지) ────────────────────────────────
+# ── 프로필 경로 ────────────────────────────────────────────────────────────────
 if sys.platform == "win32":
     _local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
     CHROME_PROFILE_DIR = str(_local / "MultiMind" / "ChromeProfile")
+    _MAIN_CHROME_DEFAULT = _local / "Google" / "Chrome" / "User Data" / "Default"
+    _MAIN_CHROME_LOCAL_STATE = _local / "Google" / "Chrome" / "User Data" / "Local State"
 else:
     CHROME_PROFILE_DIR = str(Path.home() / ".multimind" / "chrome-profile")
+    _MAIN_CHROME_DEFAULT = None
+    _MAIN_CHROME_LOCAL_STATE = None
 
-# ── LLM 사이트 URL ────────────────────────────────────────────────────────────
+# ── LLM URL ───────────────────────────────────────────────────────────────────
 LLM_URLS = {
     "claude":  "https://claude.ai/new",
     "chatgpt": "https://chatgpt.com/",
     "gemini":  "https://gemini.google.com/app",
 }
 
-# ── CSS 셀렉터 목록 (앞에서부터 순서대로 시도) ──────────────────────────────────
+# ── CSS 셀렉터 (앞에서부터 순서대로 시도) ────────────────────────────────────────
 _INPUT = {
     "claude":  [
         'div.ProseMirror[contenteditable="true"]',
@@ -75,9 +79,8 @@ _SEND = {
 
 _RESPONSE = {
     "claude":  [
-        'div[data-testid="user-human-turn"] + div .prose',
         ".prose",
-        'div[data-is-streaming]',
+        'div[data-testid="user-human-turn"] + div .prose',
         '[data-testid="assistant-message"]',
     ],
     "chatgpt": [
@@ -93,45 +96,78 @@ _RESPONSE = {
     ],
 }
 
-ELEMENT_WAIT = 25    # 요소 탐색 최대 대기 (초)
-STABLE_SECS  = 3     # 텍스트가 이 초 동안 변하지 않으면 완료
+# 로그인 페이지로 판단하는 URL 키워드
+_LOGIN_URL_KEYWORDS = ["login", "signin", "sign-in", "auth", "accounts.google"]
+
+ELEMENT_WAIT  = 20
+STABLE_SECS   = 3
 RESPONSE_TIMEOUT = 300
+LOGIN_POLL_INTERVAL = 5   # 로그인 확인 주기 (초)
+LOGIN_TIMEOUT  = 300      # 로그인 최대 대기 (초)
+
+
+def _sync_cookies() -> None:
+    """기존 Chrome Default 프로필의 세션 파일을 MultiMind 프로필로 복사.
+    이미 복사된 파일은 건너뜀. Chrome이 실행 중이면 일부 파일은 잠겨 실패할 수 있음.
+    """
+    if _MAIN_CHROME_DEFAULT is None or not _MAIN_CHROME_DEFAULT.exists():
+        return
+
+    dst = Path(CHROME_PROFILE_DIR) / "Default"
+    dst.mkdir(parents=True, exist_ok=True)
+
+    # Local State (암호화 키 포함) — 최상위 User Data 폴더에 있음
+    if _MAIN_CHROME_LOCAL_STATE and _MAIN_CHROME_LOCAL_STATE.exists():
+        dst_ls = Path(CHROME_PROFILE_DIR) / "Local State"
+        if not dst_ls.exists():
+            try:
+                shutil.copy2(str(_MAIN_CHROME_LOCAL_STATE), str(dst_ls))
+            except OSError:
+                pass
+
+    # 세션/쿠키 파일
+    for fname in ["Cookies", "Login Data", "Login Data For Account",
+                  "Web Data", "Preferences"]:
+        src_file = _MAIN_CHROME_DEFAULT / fname
+        dst_file = dst / fname
+        if src_file.exists() and not dst_file.exists():
+            try:
+                shutil.copy2(str(src_file), str(dst_file))
+            except OSError:
+                pass
 
 
 class LLMDriver:
-    """멀티탭 Chrome 드라이버."""
+    """undetected-chromedriver 기반 멀티탭 LLM 드라이버."""
 
     def __init__(self, log_fn=None):
         self._log = log_fn or (lambda m: None)
         self._send_lock = threading.Lock()
-        self.driver: Optional[webdriver.Chrome] = None
+        self.driver: Optional[uc.Chrome] = None
         self._tabs: dict[str, str] = {}
 
     # ── 초기화 ─────────────────────────────────────────────────────────────────
 
     def start(self) -> None:
-        """Chrome 시작 (전용 프로필로 로그인 세션 유지)"""
+        """Chrome 시작 (봇 감지 우회 + 기존 세션 복사)"""
         Path(CHROME_PROFILE_DIR).mkdir(parents=True, exist_ok=True)
 
-        opts = Options()
+        self._log("기존 Chrome 세션 파일 복사 중...")
+        _sync_cookies()
+
+        opts = uc.ChromeOptions()
         opts.add_argument(f"--user-data-dir={CHROME_PROFILE_DIR}")
         opts.add_argument("--profile-directory=Default")
         opts.add_argument("--no-first-run")
         opts.add_argument("--no-default-browser-check")
-        opts.add_argument("--disable-blink-features=AutomationControlled")
-        opts.add_experimental_option("excludeSwitches",
-                                     ["enable-automation", "enable-logging"])
-        opts.add_experimental_option("useAutomationExtension", False)
 
         try:
-            self.driver = webdriver.Chrome(options=opts)
-        except WebDriverException as e:
-            if "cannot find Chrome binary" in str(e).lower():
-                raise LLMDriverError("chrome", "Chrome이 설치되어 있지 않거나 경로를 찾을 수 없습니다.")
+            self.driver = uc.Chrome(options=opts, use_subprocess=True)
+        except Exception as e:
             raise LLMDriverError("chrome", f"Chrome 시작 실패: {e}")
 
         self.driver.set_page_load_timeout(60)
-        self._log("Chrome 시작됨")
+        self._log("Chrome 시작됨 (봇 감지 우회 활성화)")
 
     def open_tabs(self, llm_names: list) -> None:
         """각 LLM을 새 탭으로 열기"""
@@ -146,6 +182,22 @@ class LLMDriver:
             self._log(f"[{name}] 탭 열림")
             time.sleep(2.0)
 
+    def wait_for_login(self, llm_names: list) -> None:
+        """로그인이 필요한 LLM을 감지하고, 모두 로그인될 때까지 대기."""
+        deadline = time.time() + LOGIN_TIMEOUT
+        while time.time() < deadline:
+            pending = [n for n in llm_names if not self._check_logged_in(n)]
+            if not pending:
+                self._log("모든 LLM 로그인 확인 완료 ✓")
+                return
+            self._log(
+                f"로그인 필요: {', '.join(pending)}\n"
+                "  → 브라우저 창에서 직접 로그인해주세요. 로그인하면 자동으로 계속됩니다."
+            )
+            time.sleep(LOGIN_POLL_INTERVAL)
+
+        self._log("⚠ 일부 LLM이 아직 로그인되지 않았습니다. 계속 진행합니다.")
+
     def switch_to(self, llm_name: str) -> None:
         handle = self._tabs.get(llm_name)
         if handle and self.driver.current_window_handle != handle:
@@ -154,11 +206,10 @@ class LLMDriver:
     # ── 핵심 작업 ──────────────────────────────────────────────────────────────
 
     def send_prompt(self, llm_name: str, prompt: str) -> None:
-        """입력창에 프롬프트를 입력하고 전송 (전송 직렬화)"""
+        """프롬프트 입력 및 전송 (직렬화)"""
         with self._send_lock:
             self.switch_to(llm_name)
 
-            # 입력창 찾기
             input_el = self._find_any(_INPUT[llm_name], ELEMENT_WAIT)
             if input_el is None:
                 raise LLMDriverError(
@@ -168,19 +219,15 @@ class LLMDriver:
 
             input_el.click()
             time.sleep(0.3)
-
-            # 기존 내용 전체 선택 후 삭제
             input_el.send_keys(Keys.CONTROL, "a")
             time.sleep(0.1)
             input_el.send_keys(Keys.DELETE)
             time.sleep(0.1)
 
-            # 클립보드 붙여넣기 (한글/특수문자 안전)
             pyperclip.copy(prompt)
             input_el.send_keys(Keys.CONTROL, "v")
             time.sleep(0.5)
 
-            # 전송 버튼 클릭 (못 찾으면 Enter 폴백)
             send_el = self._find_any(_SEND[llm_name], 10)
             if send_el:
                 try:
@@ -195,12 +242,11 @@ class LLMDriver:
     def wait_response(self, llm_name: str,
                       timeout: int = RESPONSE_TIMEOUT,
                       log_fn=None) -> str:
-        """응답 텍스트가 안정될 때까지 대기 후 반환 (락 없이 병렬 가능)"""
+        """응답 텍스트가 안정될 때까지 대기 후 반환"""
         _log = log_fn or self._log
         selectors = _RESPONSE[llm_name]
         deadline = time.time() + timeout
 
-        # 전송 직후 잠시 대기
         time.sleep(3.0)
 
         last_text = ""
@@ -228,7 +274,6 @@ class LLMDriver:
 
             time.sleep(1.0)
 
-        # 타임아웃 — 마지막으로 받은 텍스트라도 반환
         if last_text:
             _log(f"[{llm_name}] 타임아웃 — 부분 응답 반환")
             return last_text
@@ -243,6 +288,25 @@ class LLMDriver:
             self.driver = None
 
     # ── 내부 헬퍼 ──────────────────────────────────────────────────────────────
+
+    def _check_logged_in(self, llm_name: str) -> bool:
+        """해당 LLM 탭이 로그인된 상태인지 확인"""
+        try:
+            self.switch_to(llm_name)
+            url = self.driver.current_url.lower()
+
+            # 로그인 페이지 URL이면 False
+            if any(k in url for k in _LOGIN_URL_KEYWORDS):
+                return False
+
+            # 입력창이 있으면 로그인된 것으로 판단
+            for sel in _INPUT[llm_name]:
+                els = self.driver.find_elements(By.CSS_SELECTOR, sel)
+                if els:
+                    return True
+        except Exception:
+            pass
+        return False
 
     def _find_any(self, selectors: list, timeout: float):
         """셀렉터 목록을 순서대로 시도해 처음 찾은 요소 반환"""
