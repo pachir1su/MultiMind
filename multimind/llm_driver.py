@@ -115,66 +115,90 @@ LOGIN_TIMEOUT  = 300      # 로그인 최대 대기 (초)
 
 
 _SESSION_FILES = [
-    "Cookies", "Cookies-journal",
-    "Login Data", "Login Data-journal", "Login Data For Account",
-    "Web Data", "Web Data-journal",
+    "Cookies", "Cookies-journal", "Cookies-wal", "Cookies-shm",
+    "Login Data", "Login Data-journal", "Login Data-wal", "Login Data-shm",
+    "Login Data For Account",
+    "Web Data", "Web Data-journal", "Web Data-wal", "Web Data-shm",
     "Preferences", "Secure Preferences",
 ]
 
 
-def _sync_cookies() -> None:
+def _is_profile_locked() -> bool:
+    """Chrome User Data 디렉토리가 다른 인스턴스에 잠겨있는지 확인."""
+    for name in ["lockfile", "SingletonLock"]:
+        p = _CHROME_USER_DATA / name
+        try:
+            if p.exists() or p.is_symlink():
+                return True
+        except OSError:
+            return True
+    return False
+
+
+def _sync_cookies(log_fn=None) -> None:
     """기존 Chrome 프로필의 세션 데이터를 MultiMind 전용 프로필로 복사.
-    이미 복사된 파일은 건너뜀. Chrome이 실행 중이면 일부 파일은 잠겨 실패할 수 있음.
+    항상 최신 데이터로 덮어씀. 복사 결과를 로그로 출력.
     """
+    _log = log_fn or (lambda m: None)
     src_default = _CHROME_USER_DATA / "Default"
     if not src_default.exists():
+        _log("Chrome Default 프로필을 찾을 수 없음")
         return
 
     dst = Path(CHROME_PROFILE_DIR) / "Default"
     dst.mkdir(parents=True, exist_ok=True)
+    copied, failed = 0, 0
 
     # Local State (쿠키 암호화 키 포함)
     src_ls = _CHROME_USER_DATA / "Local State"
     dst_ls = Path(CHROME_PROFILE_DIR) / "Local State"
-    if src_ls.exists() and not dst_ls.exists():
+    if src_ls.exists():
         try:
             shutil.copy2(str(src_ls), str(dst_ls))
+            copied += 1
         except OSError:
-            pass
+            failed += 1
 
-    # 세션/쿠키 파일
+    # 세션/쿠키 파일 (항상 최신으로 덮어씀)
     for fname in _SESSION_FILES:
         src_file = src_default / fname
         dst_file = dst / fname
-        if src_file.exists() and not dst_file.exists():
+        if src_file.exists():
             try:
                 shutil.copy2(str(src_file), str(dst_file))
+                copied += 1
             except OSError:
-                pass
+                failed += 1
 
-    # Local Storage (일부 사이트의 인증 토큰 저장)
+    # 세션 관련 디렉토리
     for dirname in ["Local Storage", "Session Storage"]:
         src_dir = src_default / dirname
         dst_dir = dst / dirname
-        if src_dir.exists() and not dst_dir.exists():
+        if src_dir.exists():
+            if dst_dir.exists():
+                shutil.rmtree(str(dst_dir), ignore_errors=True)
             try:
                 shutil.copytree(str(src_dir), str(dst_dir))
+                copied += 1
             except OSError:
-                pass
+                failed += 1
 
     # Network 디렉토리 내 Cookies (최신 Chrome)
     src_net = src_default / "Network"
     dst_net = dst / "Network"
     if src_net.exists():
         dst_net.mkdir(parents=True, exist_ok=True)
-        for fname in ["Cookies", "Cookies-journal"]:
+        for fname in ["Cookies", "Cookies-journal", "Cookies-wal", "Cookies-shm"]:
             src_file = src_net / fname
             dst_file = dst_net / fname
-            if src_file.exists() and not dst_file.exists():
+            if src_file.exists():
                 try:
                     shutil.copy2(str(src_file), str(dst_file))
+                    copied += 1
                 except OSError:
-                    pass
+                    failed += 1
+
+    _log(f"세션 파일 복사 완료: {copied}개 성공, {failed}개 실패")
 
 
 def _detect_chrome_version() -> Optional[int]:
@@ -242,6 +266,7 @@ class LLMDriver:
             opts.add_argument("--profile-directory=Default")
             opts.add_argument("--no-first-run")
             opts.add_argument("--no-default-browser-check")
+            opts.add_argument("--disable-popup-blocking")
             return opts
 
         def _try_launch(data_dir, ver=version_main):
@@ -250,61 +275,69 @@ class LLMDriver:
                 kwargs["version_main"] = ver
             return uc.Chrome(**kwargs)
 
-        # 1차: 기존 Chrome 프로필 직접 사용
-        self._log("기존 Chrome 프로필로 시작 중...")
-        try:
-            self.driver = _try_launch(str(_CHROME_USER_DATA))
-            self._log("기존 Chrome 프로필 연결 성공 (로그인 세션 유지)")
-        except Exception as first_err:
-            self.driver = None
-            # 버전 불일치면 버전 맞춰 재시도
-            parsed_ver = _parse_version_from_error(str(first_err))
-            if parsed_ver and parsed_ver != version_main:
-                self._log(f"드라이버 버전 불일치 — Chrome {parsed_ver}에 맞춰 재시도...")
-                try:
-                    self.driver = _try_launch(str(_CHROME_USER_DATA), parsed_ver)
-                    version_main = parsed_ver
-                except Exception:
-                    pass
+        profile_locked = _is_profile_locked()
 
-            # 2차: 별도 프로필 + 세션 복사
-            if self.driver is None:
+        if not profile_locked:
+            # 프로필 잠금 없음 → 기존 프로필 직접 사용
+            self._log("기존 Chrome 프로필로 시작 중...")
+            try:
+                self.driver = _try_launch(str(_CHROME_USER_DATA))
+                self._log("기존 Chrome 프로필 연결 성공 (로그인 세션 유지)")
+            except Exception as e:
+                self.driver = None
+                parsed_ver = _parse_version_from_error(str(e))
+                if parsed_ver and parsed_ver != version_main:
+                    try:
+                        self.driver = _try_launch(str(_CHROME_USER_DATA), parsed_ver)
+                        version_main = parsed_ver
+                        self._log("기존 Chrome 프로필 연결 성공 (로그인 세션 유지)")
+                    except Exception:
+                        pass
+
+        if self.driver is None:
+            # 프로필 잠김 or 기존 프로필 실패 → 별도 프로필 + 세션 복사
+            if profile_locked:
                 self._log(
-                    "기존 프로필 사용 불가 (Chrome이 실행 중일 수 있음)\n"
-                    "  → 별도 프로필로 시작합니다. 로그인이 필요할 수 있습니다.\n"
+                    "Chrome이 실행 중 — 별도 프로필로 시작합니다\n"
                     "  → 팁: Chrome을 완전히 종료(시스템 트레이 포함)한 후 실행하면 자동 로그인됩니다."
                 )
-                Path(CHROME_PROFILE_DIR).mkdir(parents=True, exist_ok=True)
-                _sync_cookies()
-                try:
-                    self.driver = _try_launch(
-                        CHROME_PROFILE_DIR, parsed_ver or version_main
-                    )
-                except Exception as e2:
-                    raise LLMDriverError("chrome", f"Chrome 시작 실패: {e2}")
+            else:
+                self._log("기존 프로필 사용 실패 — 별도 프로필로 시작합니다")
+            Path(CHROME_PROFILE_DIR).mkdir(parents=True, exist_ok=True)
+            _sync_cookies(log_fn=self._log)
+            try:
+                self.driver = _try_launch(CHROME_PROFILE_DIR)
+            except Exception as e:
+                parsed_ver = _parse_version_from_error(str(e))
+                if parsed_ver and parsed_ver != version_main:
+                    try:
+                        self.driver = _try_launch(CHROME_PROFILE_DIR, parsed_ver)
+                    except Exception as e2:
+                        raise LLMDriverError("chrome", f"Chrome 시작 실패: {e2}")
+                else:
+                    raise LLMDriverError("chrome", f"Chrome 시작 실패: {e}")
 
         self.driver.set_page_load_timeout(60)
         self._log("Chrome 시작됨 (봇 감지 우회 활성화)")
 
     def open_tabs(self, llm_names: list) -> None:
-        """각 LLM을 새 탭으로 열기 (페이지 로드 완료 대기)"""
+        """각 LLM을 새 탭으로 열기 (Selenium WebDriver 기반, 페이지 로드 대기)"""
         for i, name in enumerate(llm_names):
             url = LLM_URLS[name]
             if i == 0:
                 self.driver.get(url)
             else:
-                self.driver.execute_script(f"window.open('{url}', '_blank');")
-                time.sleep(1.0)
-                self.driver.switch_to.window(self.driver.window_handles[-1])
+                self.driver.switch_to.new_window("tab")
+                self.driver.get(url)
             self._tabs[name] = self.driver.current_window_handle
             try:
-                WebDriverWait(self.driver, 20).until(
+                WebDriverWait(self.driver, 30).until(
                     lambda d: d.execute_script("return document.readyState") == "complete"
                 )
             except (TimeoutException, Exception):
                 pass
             self._log(f"[{name}] 탭 열림 — {self.driver.title}")
-            time.sleep(1.0)
+            time.sleep(1.5)
 
     def wait_for_login(self, llm_names: list) -> None:
         """로그인이 필요한 LLM을 감지하고, 모두 로그인될 때까지 대기."""
