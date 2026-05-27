@@ -1,12 +1,12 @@
 # MultiMind — 멀티 LLM 오케스트레이터
 
 2026 한국기술교육대학교 컴퓨팅사고 27분반 개인 프로젝트<br>
-API 없이 pyautogui로 여러 LLM 브라우저를 동시에 조작하고, Head LLM이 결과를 종합하는 RPA 기반 자동화 프로그램
+API 없이 pyautogui로 여러 LLM 브라우저를 동시에 조작하고 Head LLM이 결과를 종합하는 RPA 기반 자동화 프로그램
 
 ---
 
 ## 버전 기록
-v0.1.16 QA 통과
+v0.1.16 QA 통과<br>
 v0.2.2 QA 절반 통과 : Gemini 오류
 
 ---
