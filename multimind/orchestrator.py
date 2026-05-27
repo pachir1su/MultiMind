@@ -114,6 +114,15 @@ class Orchestrator:
         for t in threads:
             t.join(timeout=MAX_PARALLEL_TIMEOUT)
 
+        # 타임아웃으로 미완료된 스레드는 결과에 TIMEOUT 마킹
+        for name, t in zip(handlers.keys(), threads):
+            if t.is_alive():
+                with results_lock:
+                    results.setdefault(name, "[TIMEOUT]")
+                self._put({"type": "worker_error", "llm": name,
+                           "error": f"전체 병렬 타임아웃 ({MAX_PARALLEL_TIMEOUT}s)"})
+                write_log(f"Worker 전체 타임아웃: {name}")
+
         return results
 
     def _worker_task(self, name: str, handler: WorkerLLMHandler,

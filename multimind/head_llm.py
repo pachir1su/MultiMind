@@ -83,7 +83,7 @@ class HeadLLMHandler(WorkerLLMHandler):
         if match:
             try:
                 data = json.loads(match.group())
-                if isinstance(data, dict):
+                if isinstance(data, dict) and any(k in data for k in worker_names):
                     return data
             except (json.JSONDecodeError, ValueError):
                 pass
