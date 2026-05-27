@@ -323,6 +323,7 @@ class LLMDriver:
     def __init__(self, log_fn=None):
         self._log = log_fn or (lambda m: None)
         self._send_lock = threading.Lock()
+        self._baselines: dict[str, str] = {}
         self.driver = None  # uc.Chrome when running
         self._tabs: dict[str, str] = {}
 
@@ -518,6 +519,7 @@ class LLMDriver:
         """프롬프트 입력 및 전송 (직렬화, CSS → JS 폴백 → 새로고침 재시도)"""
         with self._send_lock:
             self.switch_to(llm_name)
+            self._baselines[llm_name] = self._get_last_text(_RESPONSE[llm_name])
 
             for attempt in range(2):
                 try:
@@ -584,6 +586,7 @@ class LLMDriver:
         """응답 텍스트가 안정될 때까지 대기 후 반환"""
         _log = log_fn or self._log
         selectors = _RESPONSE[llm_name]
+        baseline = self._baselines.pop(llm_name, "")
         deadline = time.time() + timeout
 
         time.sleep(3.0)
@@ -596,6 +599,9 @@ class LLMDriver:
         while time.time() < deadline:
             self.switch_to(llm_name)
             text = self._get_last_text(selectors)
+
+            if text and text == baseline:
+                text = ""
 
             if text and not text_ever_found:
                 text_ever_found = True
