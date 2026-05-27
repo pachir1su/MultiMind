@@ -11,6 +11,8 @@ class HeadLLMHandler(WorkerLLMHandler):
     def __init__(self, llm_name: str, driver: LLMDriver,
                  event_queue: queue.Queue):
         super().__init__(llm_name, driver, event_queue)
+        self.last_sent_prompt = ""
+        self.last_raw_response = ""
 
     def refine_prompt(self, user_prompt: str, worker_names: list) -> dict:
         """사용자 프롬프트를 각 Worker LLM에 최적화된 형태로 변환."""
@@ -26,7 +28,9 @@ class HeadLLMHandler(WorkerLLMHandler):
         )
 
         self._log(f"[Head: {self.llm_name}] 프롬프트 정제 요청 중...")
+        self.last_sent_prompt = prompt
         raw = self.send_and_receive(prompt)
+        self.last_raw_response = raw
 
         refined = self._parse_json(raw, worker_names)
         if refined:
@@ -52,7 +56,9 @@ class HeadLLMHandler(WorkerLLMHandler):
         )
 
         self._log(f"[Head: {self.llm_name}] 결과 종합 중...")
+        self.last_sent_prompt = prompt
         result = self.send_and_receive(prompt)
+        self.last_raw_response = result
         self._log(f"[Head: {self.llm_name}] 최종 답변 생성 완료")
         return result
 
