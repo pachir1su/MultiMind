@@ -5,9 +5,11 @@ undetected-chromedriver 기반 LLM 드라이버.
 - 기존 Chrome이 열려 있든 없든 독립 실행
 """
 import os
+import re
 import sys
 import time
 import shutil
+import subprocess
 import threading
 from pathlib import Path
 from typing import Optional
@@ -142,6 +144,41 @@ def _sync_cookies() -> None:
                 pass
 
 
+def _detect_chrome_version() -> Optional[int]:
+    """설치된 Chrome의 메이저 버전 번호를 감지."""
+    if sys.platform == "win32":
+        try:
+            result = subprocess.run(
+                ["reg", "query",
+                 r"HKEY_CURRENT_USER\Software\Google\Chrome\BLBeacon",
+                 "/v", "version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            m = re.search(r"(\d+)\.", result.stdout)
+            if m:
+                return int(m.group(1))
+        except Exception:
+            pass
+    else:
+        for cmd in ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"]:
+            try:
+                result = subprocess.run(
+                    [cmd, "--version"], capture_output=True, text=True, timeout=10,
+                )
+                m = re.search(r"(\d+)\.", result.stdout)
+                if m:
+                    return int(m.group(1))
+            except Exception:
+                continue
+    return None
+
+
+def _parse_version_from_error(error_msg: str) -> Optional[int]:
+    """버전 불일치 에러 메시지에서 실제 Chrome 버전을 추출."""
+    m = re.search(r"Current browser version is (\d+)", error_msg)
+    return int(m.group(1)) if m else None
+
+
 class LLMDriver:
     """undetected-chromedriver 기반 멀티탭 LLM 드라이버."""
 
@@ -166,16 +203,36 @@ class LLMDriver:
         self._log("기존 Chrome 세션 파일 복사 중...")
         _sync_cookies()
 
-        opts = uc.ChromeOptions()
-        opts.add_argument(f"--user-data-dir={CHROME_PROFILE_DIR}")
-        opts.add_argument("--profile-directory=Default")
-        opts.add_argument("--no-first-run")
-        opts.add_argument("--no-default-browser-check")
+        version_main = _detect_chrome_version()
+
+        def _build_options():
+            opts = uc.ChromeOptions()
+            opts.add_argument(f"--user-data-dir={CHROME_PROFILE_DIR}")
+            opts.add_argument("--profile-directory=Default")
+            opts.add_argument("--no-first-run")
+            opts.add_argument("--no-default-browser-check")
+            return opts
 
         try:
-            self.driver = uc.Chrome(options=opts, use_subprocess=True)
+            kwargs = dict(options=_build_options(), use_subprocess=True)
+            if version_main:
+                kwargs["version_main"] = version_main
+                self._log(f"Chrome 버전 {version_main} 감지됨")
+            self.driver = uc.Chrome(**kwargs)
         except Exception as e:
-            raise LLMDriverError("chrome", f"Chrome 시작 실패: {e}")
+            parsed_ver = _parse_version_from_error(str(e))
+            if parsed_ver and parsed_ver != version_main:
+                self._log(f"드라이버 버전 불일치 — Chrome {parsed_ver}에 맞춰 재시도 중...")
+                try:
+                    self.driver = uc.Chrome(
+                        options=_build_options(),
+                        use_subprocess=True,
+                        version_main=parsed_ver,
+                    )
+                except Exception as e2:
+                    raise LLMDriverError("chrome", f"Chrome 시작 실패: {e2}")
+            else:
+                raise LLMDriverError("chrome", f"Chrome 시작 실패: {e}")
 
         self.driver.set_page_load_timeout(60)
         self._log("Chrome 시작됨 (봇 감지 우회 활성화)")
