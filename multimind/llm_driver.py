@@ -166,7 +166,7 @@ input.dispatchEvent(new Event('input', {bubbles: true}));
 return true;
 """
 
-_JS_CLICK_SEND = """
+_JS_FIND_SEND = """
 var sels = ['button[aria-label="Send message"]',
             'button[aria-label="Send Message"]',
             'button[aria-label="Send"]',
@@ -178,25 +178,16 @@ var sels = ['button[aria-label="Send message"]',
             'button[data-testid="send-message-button"]',
             '.trailing-icon-button',
             '.input-area-container button[aria-label]'];
-function robustClick(btn) {
-    btn.scrollIntoView({block: 'center'});
-    btn.focus();
-    btn.click();
-    btn.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true}));
-    btn.dispatchEvent(new PointerEvent('pointerup', {bubbles: true}));
-    btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
-    return true;
-}
 for (var s of sels) {
     var btn = document.querySelector(s);
-    if (btn && !btn.disabled) return robustClick(btn);
+    if (btn && !btn.disabled) return btn;
 }
 var buttons = document.querySelectorAll('button[aria-label]');
 for (var b of buttons) {
     var label = (b.getAttribute('aria-label') || '').toLowerCase();
     if ((label.includes('send') || label.includes('전송') || label.includes('보내'))
         && !b.disabled && b.offsetParent !== null) {
-        return robustClick(b);
+        return b;
     }
 }
 var allBtns = document.querySelectorAll('button');
@@ -204,10 +195,10 @@ for (var b of allBtns) {
     var cl = (b.className || '').toLowerCase();
     if ((cl.includes('send') || cl.includes('submit'))
         && !b.disabled && b.offsetParent !== null) {
-        return robustClick(b);
+        return b;
     }
 }
-return false;
+return null;
 """
 
 
@@ -571,6 +562,18 @@ class LLMDriver:
     def _do_send(self, llm_name: str, prompt: str) -> None:
         """CSS 셀렉터 기반 프롬프트 전송"""
         input_el = self._find_any(_INPUT[llm_name], ELEMENT_WAIT)
+
+        # Gemini Shadow DOM 내부 입력창 탐색
+        if input_el is None and llm_name == "gemini":
+            input_el = self.driver.execute_script("""
+                var rt = document.querySelector('rich-textarea');
+                if (!rt) return null;
+                var root = rt.shadowRoot || rt;
+                return root.querySelector('.ql-editor.textarea')
+                    || root.querySelector('.ql-editor')
+                    || root.querySelector('[contenteditable="true"]');
+            """)
+
         if input_el is None:
             raise NoSuchElementException("입력창 미발견")
 
@@ -585,53 +588,42 @@ class LLMDriver:
         input_el.send_keys(Keys.CONTROL, "v")
         time.sleep(0.5)
 
+        # 전송 버튼: CSS → JS 폴백으로 탐색
         send_el = self._find_any(_SEND[llm_name], 10)
+        if send_el is None:
+            send_el = self.driver.execute_script(_JS_FIND_SEND)
+
         if send_el:
+            from selenium.webdriver.common.action_chains import ActionChains
             try:
-                send_el.click()
+                ActionChains(self.driver).move_to_element(send_el).pause(0.2).click().perform()
             except Exception:
                 input_el.send_keys(Keys.RETURN)
         else:
             input_el.send_keys(Keys.RETURN)
 
     def _do_send_js(self, llm_name: str, prompt: str) -> bool:
-        """JavaScript 기반 프롬프트 전송 (Shadow DOM 대응)"""
+        """JavaScript 텍스트 입력 + Selenium trusted 클릭 전송"""
         try:
             if not self.driver.execute_script(_JS_SET_TEXT, prompt):
                 return False
             time.sleep(1.0)
-            if self.driver.execute_script(_JS_CLICK_SEND):
-                return True
-            # Gemini에서는 Enter가 줄바꿈이므로 버튼 재탐색 시도
-            if llm_name == "gemini":
-                time.sleep(0.5)
-                sent = self.driver.execute_script("""
-                    var btns = document.querySelectorAll('button');
-                    for (var b of btns) {
-                        var r = b.getBoundingClientRect();
-                        if (r.width > 0 && r.width < 60 && r.height > 0
-                            && r.height < 60 && !b.disabled) {
-                            var svg = b.querySelector('svg, mat-icon, .material-icons, img, icon');
-                            var label = (b.getAttribute('aria-label') || '').toLowerCase();
-                            var cl = (b.className || '').toLowerCase();
-                            if (svg || label || cl.includes('send') || cl.includes('icon')) {
-                                var style = window.getComputedStyle(b);
-                                var bg = style.backgroundColor;
-                                if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') {
-                                    b.click();
-                                    b.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true}));
-                                    b.dispatchEvent(new PointerEvent('pointerup', {bubbles:true}));
-                                    b.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true}));
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                    return false;
-                """)
-                if sent:
-                    return True
+
             from selenium.webdriver.common.action_chains import ActionChains
+
+            # JS로 전송 버튼을 찾고, Selenium ActionChains로 클릭 (trusted event)
+            sendBtn = self.driver.execute_script(_JS_FIND_SEND)
+            if sendBtn:
+                ActionChains(self.driver).move_to_element(sendBtn).pause(0.3).click().perform()
+                return True
+
+            # CSS 셀렉터로 전송 버튼 재시도
+            sendEl = self._find_any(_SEND.get(llm_name, []), 5)
+            if sendEl:
+                ActionChains(self.driver).move_to_element(sendEl).pause(0.3).click().perform()
+                return True
+
+            # 최종 폴백: Enter 키
             ActionChains(self.driver).send_keys(Keys.RETURN).perform()
             return True
         except Exception:
