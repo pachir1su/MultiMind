@@ -34,6 +34,10 @@ class Orchestrator:
 
     def run(self) -> None:
         """오케스트레이션 전체 흐름 실행 (백그라운드 스레드에서 호출)"""
+        # 페일세이프 방지: 마우스를 화면 중앙으로 이동
+        sw, sh = pyautogui.size()
+        pyautogui.moveTo(sw // 2, sh // 2)
+
         confidence = self.settings.get("image_confidence", 0.85)
         poll_interval = self.settings.get("poll_interval", 0.5)
         open_delay = self.settings.get("open_delay", 3.0)
