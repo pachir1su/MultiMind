@@ -385,6 +385,7 @@ class LLMDriver:
 
         if not pending:
             self._log("모든 LLM 로그인 확인 완료 ✓")
+            self._verify_ready(llm_names)
             return
 
         self._log(
@@ -403,6 +404,7 @@ class LLMDriver:
 
             if not pending:
                 self._log("모든 LLM 로그인 확인 완료 ✓")
+                self._verify_ready(llm_names)
                 return
 
             now = time.time()
@@ -412,6 +414,27 @@ class LLMDriver:
                 last_status_log = now
 
         self._log("⚠ 일부 LLM이 아직 로그인되지 않았습니다. 계속 진행합니다.")
+
+    def _verify_ready(self, llm_names: list) -> None:
+        """각 LLM 탭의 입력창이 실제로 준비될 때까지 대기. 미발견 시 새로고침."""
+        self._log("각 LLM 입력창 확인 중...")
+        for name in llm_names:
+            self.switch_to(name)
+            if self._find_any(_INPUT[name], 15):
+                self._log(f"[{name}] 입력창 준비 완료")
+                continue
+            self._log(f"[{name}] 입력창 미발견 — 페이지 새로고침")
+            self.driver.refresh()
+            try:
+                WebDriverWait(self.driver, 15).until(
+                    lambda d: d.execute_script("return document.readyState") == "complete"
+                )
+            except (TimeoutException, Exception):
+                pass
+            if self._find_any(_INPUT[name], 20):
+                self._log(f"[{name}] 새로고침 후 준비 완료")
+            else:
+                self._log(f"[{name}] ⚠ 입력창 없음 — 프롬프트 전송 시 재시도 예정")
 
     def switch_to(self, llm_name: str) -> None:
         handle = self._tabs.get(llm_name)
@@ -426,6 +449,11 @@ class LLMDriver:
             self.switch_to(llm_name)
 
             input_el = self._find_any(_INPUT[llm_name], ELEMENT_WAIT)
+            if input_el is None:
+                self._log(f"[{llm_name}] 입력창 미발견 — 새로고침 후 재시도")
+                self.driver.refresh()
+                time.sleep(3)
+                input_el = self._find_any(_INPUT[llm_name], 30)
             if input_el is None:
                 raise LLMDriverError(
                     llm_name,
