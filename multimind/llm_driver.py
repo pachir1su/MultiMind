@@ -503,10 +503,15 @@ class LLMDriver:
         last_text = ""
         stable_count = 0
         last_log_time = time.time()
+        text_ever_found = False
 
         while time.time() < deadline:
             self.switch_to(llm_name)
             text = self._get_last_text(selectors)
+
+            if text and not text_ever_found:
+                text_ever_found = True
+                _log(f"[{llm_name}] 응답 감지 시작 ({len(text)}자)")
 
             if text and text == last_text:
                 stable_count += 1
@@ -520,13 +525,16 @@ class LLMDriver:
             now = time.time()
             if now - last_log_time >= 10:
                 elapsed = int(now - (deadline - timeout))
-                _log(f"[{llm_name}] 응답 대기 중... ({elapsed}초 경과)")
+                if text_ever_found:
+                    _log(f"[{llm_name}] 응답 생성 중... ({elapsed}초, 현재 {len(last_text)}자)")
+                else:
+                    _log(f"[{llm_name}] ⚠ 응답 텍스트 미감지 ({elapsed}초) — 셀렉터: {selectors[0]}")
                 last_log_time = now
 
             time.sleep(1.0)
 
         if last_text:
-            _log(f"[{llm_name}] 타임아웃 — 부분 응답 반환")
+            _log(f"[{llm_name}] 타임아웃 — 부분 응답 반환 ({len(last_text)}자)")
             return last_text
         raise ResponseTimeoutError(llm_name, timeout)
 
