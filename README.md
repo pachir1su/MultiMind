@@ -7,6 +7,7 @@ API 없이 pyautogui로 여러 LLM 브라우저를 동시에 조작하고, Head 
 
 ## 버전 기록
 v0.1.16 QA 통과
+v0.2.2 QA 절반 통과 : Gemini 오류
 
 ---
 
