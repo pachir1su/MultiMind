@@ -34,13 +34,14 @@ except ModuleNotFoundError as _e:
 # ── 프로필 경로 ────────────────────────────────────────────────────────────────
 if sys.platform == "win32":
     _local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    _CHROME_USER_DATA = _local / "Google" / "Chrome" / "User Data"
     CHROME_PROFILE_DIR = str(_local / "MultiMind" / "ChromeProfile")
-    _MAIN_CHROME_DEFAULT = _local / "Google" / "Chrome" / "User Data" / "Default"
-    _MAIN_CHROME_LOCAL_STATE = _local / "Google" / "Chrome" / "User Data" / "Local State"
-else:
+elif sys.platform == "darwin":
+    _CHROME_USER_DATA = Path.home() / "Library" / "Application Support" / "Google" / "Chrome"
     CHROME_PROFILE_DIR = str(Path.home() / ".multimind" / "chrome-profile")
-    _MAIN_CHROME_DEFAULT = None
-    _MAIN_CHROME_LOCAL_STATE = None
+else:
+    _CHROME_USER_DATA = Path.home() / ".config" / "google-chrome"
+    CHROME_PROFILE_DIR = str(Path.home() / ".multimind" / "chrome-profile")
 
 # ── LLM URL ───────────────────────────────────────────────────────────────────
 LLM_URLS = {
@@ -113,35 +114,87 @@ LOGIN_POLL_INTERVAL = 5   # 로그인 확인 주기 (초)
 LOGIN_TIMEOUT  = 300      # 로그인 최대 대기 (초)
 
 
+def _is_chrome_running() -> bool:
+    """Chrome 브라우저 프로세스가 실행 중인지 확인."""
+    if sys.platform == "win32":
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq chrome.exe", "/NH"],
+                capture_output=True, text=True, timeout=10,
+            )
+            return "chrome.exe" in result.stdout.lower()
+        except Exception:
+            return False
+    try:
+        result = subprocess.run(
+            ["pgrep", "-x", "chrome"], capture_output=True, timeout=10,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+_SESSION_FILES = [
+    "Cookies", "Cookies-journal",
+    "Login Data", "Login Data-journal", "Login Data For Account",
+    "Web Data", "Web Data-journal",
+    "Preferences", "Secure Preferences",
+]
+
+
 def _sync_cookies() -> None:
-    """기존 Chrome Default 프로필의 세션 파일을 MultiMind 프로필로 복사.
+    """기존 Chrome 프로필의 세션 데이터를 MultiMind 전용 프로필로 복사.
     이미 복사된 파일은 건너뜀. Chrome이 실행 중이면 일부 파일은 잠겨 실패할 수 있음.
     """
-    if _MAIN_CHROME_DEFAULT is None or not _MAIN_CHROME_DEFAULT.exists():
+    src_default = _CHROME_USER_DATA / "Default"
+    if not src_default.exists():
         return
 
     dst = Path(CHROME_PROFILE_DIR) / "Default"
     dst.mkdir(parents=True, exist_ok=True)
 
-    # Local State (암호화 키 포함) — 최상위 User Data 폴더에 있음
-    if _MAIN_CHROME_LOCAL_STATE and _MAIN_CHROME_LOCAL_STATE.exists():
-        dst_ls = Path(CHROME_PROFILE_DIR) / "Local State"
-        if not dst_ls.exists():
-            try:
-                shutil.copy2(str(_MAIN_CHROME_LOCAL_STATE), str(dst_ls))
-            except OSError:
-                pass
+    # Local State (쿠키 암호화 키 포함)
+    src_ls = _CHROME_USER_DATA / "Local State"
+    dst_ls = Path(CHROME_PROFILE_DIR) / "Local State"
+    if src_ls.exists() and not dst_ls.exists():
+        try:
+            shutil.copy2(str(src_ls), str(dst_ls))
+        except OSError:
+            pass
 
     # 세션/쿠키 파일
-    for fname in ["Cookies", "Login Data", "Login Data For Account",
-                  "Web Data", "Preferences"]:
-        src_file = _MAIN_CHROME_DEFAULT / fname
+    for fname in _SESSION_FILES:
+        src_file = src_default / fname
         dst_file = dst / fname
         if src_file.exists() and not dst_file.exists():
             try:
                 shutil.copy2(str(src_file), str(dst_file))
             except OSError:
                 pass
+
+    # Local Storage (일부 사이트의 인증 토큰 저장)
+    for dirname in ["Local Storage", "Session Storage"]:
+        src_dir = src_default / dirname
+        dst_dir = dst / dirname
+        if src_dir.exists() and not dst_dir.exists():
+            try:
+                shutil.copytree(str(src_dir), str(dst_dir))
+            except OSError:
+                pass
+
+    # Network 디렉토리 내 Cookies (최신 Chrome)
+    src_net = src_default / "Network"
+    dst_net = dst / "Network"
+    if src_net.exists():
+        dst_net.mkdir(parents=True, exist_ok=True)
+        for fname in ["Cookies", "Cookies-journal"]:
+            src_file = src_net / fname
+            dst_file = dst_net / fname
+            if src_file.exists() and not dst_file.exists():
+                try:
+                    shutil.copy2(str(src_file), str(dst_file))
+                except OSError:
+                    pass
 
 
 def _detect_chrome_version() -> Optional[int]:
@@ -191,23 +244,30 @@ class LLMDriver:
     # ── 초기화 ─────────────────────────────────────────────────────────────────
 
     def start(self) -> None:
-        """Chrome 시작 (봇 감지 우회 + 기존 세션 복사)"""
+        """Chrome 시작 (기존 프로필 우선 사용, 봇 감지 우회)"""
         if _IMPORT_ERROR is not None:
             pkg = _IMPORT_ERROR.replace("No module named ", "").strip("'\"")
             raise MissingDependencyError(
                 pkg,
                 "pip install selenium undetected-chromedriver pyperclip",
             )
-        Path(CHROME_PROFILE_DIR).mkdir(parents=True, exist_ok=True)
-
-        self._log("기존 Chrome 세션 파일 복사 중...")
-        _sync_cookies()
 
         version_main = _detect_chrome_version()
+        chrome_running = _is_chrome_running()
 
-        def _build_options():
+        if chrome_running:
+            user_data_dir = CHROME_PROFILE_DIR
+            Path(CHROME_PROFILE_DIR).mkdir(parents=True, exist_ok=True)
+            self._log("Chrome이 실행 중 — 별도 프로필로 시작합니다")
+            self._log("기존 Chrome 세션 파일 복사 중...")
+            _sync_cookies()
+        else:
+            user_data_dir = str(_CHROME_USER_DATA)
+            self._log("기존 Chrome 프로필 사용 (로그인 세션 유지)")
+
+        def _build_options(data_dir=user_data_dir):
             opts = uc.ChromeOptions()
-            opts.add_argument(f"--user-data-dir={CHROME_PROFILE_DIR}")
+            opts.add_argument(f"--user-data-dir={data_dir}")
             opts.add_argument("--profile-directory=Default")
             opts.add_argument("--no-first-run")
             opts.add_argument("--no-default-browser-check")
@@ -229,6 +289,20 @@ class LLMDriver:
                         use_subprocess=True,
                         version_main=parsed_ver,
                     )
+                except Exception as e2:
+                    raise LLMDriverError("chrome", f"Chrome 시작 실패: {e2}")
+            elif not chrome_running:
+                self._log("기존 프로필 사용 실패 — 별도 프로필로 재시도...")
+                Path(CHROME_PROFILE_DIR).mkdir(parents=True, exist_ok=True)
+                _sync_cookies()
+                try:
+                    fallback_kwargs = dict(
+                        options=_build_options(CHROME_PROFILE_DIR),
+                        use_subprocess=True,
+                    )
+                    if version_main:
+                        fallback_kwargs["version_main"] = version_main
+                    self.driver = uc.Chrome(**fallback_kwargs)
                 except Exception as e2:
                     raise LLMDriverError("chrome", f"Chrome 시작 실패: {e2}")
             else:
