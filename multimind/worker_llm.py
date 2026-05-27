@@ -38,7 +38,8 @@ class WorkerLLMHandler:
 
             self._log(f"[{self.llm_name}] 입력창 클릭 중...")
             self.automation.click_image(
-                self._img("input_area.png"), self.llm_name
+                self._img("input_area.png"), self.llm_name,
+                log_fn=self._log
             )
             # 기존 텍스트 초기화
             pyautogui.hotkey("ctrl", "a")
@@ -52,7 +53,8 @@ class WorkerLLMHandler:
 
             self._log(f"[{self.llm_name}] 전송 중...")
             self.automation.click_image(
-                self._img("send_button_active.png"), self.llm_name
+                self._img("send_button_active.png"), self.llm_name,
+                log_fn=self._log
             )
 
         # 전송 확인 및 응답 대기: 락 없이 독립 폴링 (진짜 병렬 구간)
@@ -61,7 +63,8 @@ class WorkerLLMHandler:
             self._img("send_button_active.png"), self.llm_name, timeout=15
         )
         self.automation.wait_for_image(
-            self._img("send_button_active.png"), self.llm_name, timeout=300
+            self._img("send_button_active.png"), self.llm_name, timeout=300,
+            log_fn=self._log
         )
 
         # 복사 단계: 다시 락 보유

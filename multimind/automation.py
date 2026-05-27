@@ -34,9 +34,11 @@ class AutomationHelper:
         time.sleep(0.1)
 
     def click_image(self, image_path: str, llm_name: str = "",
-                    timeout: float = DEFAULT_CLICK_TIMEOUT) -> tuple:
+                    timeout: float = DEFAULT_CLICK_TIMEOUT,
+                    log_fn=None) -> tuple:
         """이미지가 화면에 나타날 때까지 폴링 후 클릭. 타임아웃 시 ImageNotFoundError."""
         deadline = time.time() + timeout
+        last_log = time.time()
         while time.time() < deadline:
             try:
                 loc = pyautogui.locateOnScreen(image_path, confidence=self.confidence)
@@ -50,14 +52,24 @@ class AutomationHelper:
                 center = pyautogui.center(loc)
                 pyautogui.click(center)
                 return (center.x, center.y)
+
+            now = time.time()
+            if log_fn and now - last_log >= 5.0:
+                remaining = int(deadline - now)
+                img_name = image_path.split("\\")[-1].split("/")[-1]
+                log_fn(f"[{llm_name}] '{img_name}' 탐색 중... (최대 {remaining}초 남음)")
+                last_log = now
+
             time.sleep(self.poll_interval)
 
         raise ImageNotFoundError(image_path, llm_name)
 
     def wait_for_image(self, image_path: str, llm_name: str = "",
-                       timeout: float = DEFAULT_WAIT_TIMEOUT) -> bool:
+                       timeout: float = DEFAULT_WAIT_TIMEOUT,
+                       log_fn=None) -> bool:
         """이미지가 화면에 나타날 때까지 폴링 (응답 완료 감지)."""
         deadline = time.time() + timeout
+        last_log = time.time()
         while time.time() < deadline:
             try:
                 loc = pyautogui.locateOnScreen(image_path, confidence=self.confidence)
@@ -66,6 +78,13 @@ class AutomationHelper:
 
             if loc is not None:
                 return True
+
+            now = time.time()
+            if log_fn and now - last_log >= 10.0:
+                elapsed = int(now - (deadline - timeout))
+                log_fn(f"[{llm_name}] 응답 대기 중... ({elapsed}초 경과)")
+                last_log = now
+
             time.sleep(self.poll_interval)
 
         raise ResponseTimeoutError(llm_name, timeout)

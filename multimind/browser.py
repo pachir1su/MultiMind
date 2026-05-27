@@ -38,8 +38,7 @@ class BrowserController:
             self.open_tab(name)
 
     def focus_tab(self, llm_name: str) -> bool:
-        """해당 LLM의 브라우저 창을 포그라운드로 가져오기.
-        pygetwindow를 사용하고, 실패하면 Alt+Tab 폴백."""
+        """해당 LLM의 브라우저 창을 포그라운드로 가져오기."""
         keyword = LLM_WINDOW_KEYWORDS.get(llm_name, llm_name)
         try:
             import pygetwindow as gw
@@ -48,14 +47,31 @@ class BrowserController:
                 win = windows[0]
                 if win.isMinimized:
                     win.restore()
-                win.activate()
+                    time.sleep(0.3)
+                _force_foreground(win._hWnd)
                 time.sleep(0.5)
                 return True
         except Exception:
             pass
 
-        # pygetwindow 실패 시 Alt+Tab으로 순환 (폴백)
+        # 폴백: Alt+Tab으로 순환
         import pyautogui
         pyautogui.hotkey("alt", "tab")
         time.sleep(0.5)
         return False
+
+
+def _force_foreground(hwnd: int) -> None:
+    """Windows 포커스 탈취 방지를 우회해서 창을 강제로 포그라운드로 올림."""
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        fg_hwnd = user32.GetForegroundWindow()
+        fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, None)
+        tgt_tid = user32.GetWindowThreadProcessId(hwnd, None)
+        user32.AttachThreadInput(tgt_tid, fg_tid, True)
+        user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+        user32.SetForegroundWindow(hwnd)
+        user32.AttachThreadInput(tgt_tid, fg_tid, False)
+    except Exception:
+        pass
