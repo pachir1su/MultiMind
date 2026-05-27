@@ -84,9 +84,14 @@ _SEND = {
     ],
     "gemini":  [
         'button[aria-label="Send message"]',
+        'button[aria-label="보내기"]',
         'button[aria-label="메시지 전송"]',
+        'button[aria-label="전송"]',
+        'button[aria-label="Send"]',
         "button.send-button",
         'button[data-testid="send-button"]',
+        '.trailing-icon-button',
+        '.input-area-container button[aria-label]',
     ],
 }
 
@@ -164,20 +169,42 @@ return true;
 _JS_CLICK_SEND = """
 var sels = ['button[aria-label="Send message"]',
             'button[aria-label="Send Message"]',
+            'button[aria-label="Send"]',
+            'button[aria-label="보내기"]',
             'button[aria-label="메시지 전송"]',
+            'button[aria-label="전송"]',
             'button.send-button',
             'button[data-testid="send-button"]',
-            'button[data-testid="send-message-button"]'];
+            'button[data-testid="send-message-button"]',
+            '.trailing-icon-button',
+            '.input-area-container button[aria-label]'];
+function robustClick(btn) {
+    btn.scrollIntoView({block: 'center'});
+    btn.focus();
+    btn.click();
+    btn.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true}));
+    btn.dispatchEvent(new PointerEvent('pointerup', {bubbles: true}));
+    btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+    return true;
+}
 for (var s of sels) {
     var btn = document.querySelector(s);
-    if (btn && !btn.disabled) { btn.click(); return true; }
+    if (btn && !btn.disabled) return robustClick(btn);
 }
 var buttons = document.querySelectorAll('button[aria-label]');
 for (var b of buttons) {
     var label = (b.getAttribute('aria-label') || '').toLowerCase();
-    if ((label.includes('send') || label.includes('전송'))
+    if ((label.includes('send') || label.includes('전송') || label.includes('보내'))
         && !b.disabled && b.offsetParent !== null) {
-        b.click(); return true;
+        return robustClick(b);
+    }
+}
+var allBtns = document.querySelectorAll('button');
+for (var b of allBtns) {
+    var cl = (b.className || '').toLowerCase();
+    if ((cl.includes('send') || cl.includes('submit'))
+        && !b.disabled && b.offsetParent !== null) {
+        return robustClick(b);
     }
 }
 return false;
@@ -572,10 +599,40 @@ class LLMDriver:
         try:
             if not self.driver.execute_script(_JS_SET_TEXT, prompt):
                 return False
-            time.sleep(0.5)
-            if not self.driver.execute_script(_JS_CLICK_SEND):
-                from selenium.webdriver.common.action_chains import ActionChains
-                ActionChains(self.driver).send_keys(Keys.RETURN).perform()
+            time.sleep(1.0)
+            if self.driver.execute_script(_JS_CLICK_SEND):
+                return True
+            # Gemini에서는 Enter가 줄바꿈이므로 버튼 재탐색 시도
+            if llm_name == "gemini":
+                time.sleep(0.5)
+                sent = self.driver.execute_script("""
+                    var btns = document.querySelectorAll('button');
+                    for (var b of btns) {
+                        var r = b.getBoundingClientRect();
+                        if (r.width > 0 && r.width < 60 && r.height > 0
+                            && r.height < 60 && !b.disabled) {
+                            var svg = b.querySelector('svg, mat-icon, .material-icons, img, icon');
+                            var label = (b.getAttribute('aria-label') || '').toLowerCase();
+                            var cl = (b.className || '').toLowerCase();
+                            if (svg || label || cl.includes('send') || cl.includes('icon')) {
+                                var style = window.getComputedStyle(b);
+                                var bg = style.backgroundColor;
+                                if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') {
+                                    b.click();
+                                    b.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true}));
+                                    b.dispatchEvent(new PointerEvent('pointerup', {bubbles:true}));
+                                    b.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true}));
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                    return false;
+                """)
+                if sent:
+                    return True
+            from selenium.webdriver.common.action_chains import ActionChains
+            ActionChains(self.driver).send_keys(Keys.RETURN).perform()
             return True
         except Exception:
             return False
