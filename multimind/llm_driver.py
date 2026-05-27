@@ -87,9 +87,13 @@ _SEND = {
 
 _RESPONSE = {
     "claude":  [
+        '[data-testid="assistant-message"]',
+        '[data-testid="chat-message-text"]',
+        'div[class*="font-claude"]',
+        'div[class*="prose"]',
+        'div[class*="markdown"]',
         ".prose",
         'div[data-testid="user-human-turn"] + div .prose',
-        '[data-testid="assistant-message"]',
     ],
     "chatgpt": [
         'div[data-message-author-role="assistant"] .markdown',
@@ -580,12 +584,29 @@ class LLMDriver:
         return None
 
     def _get_last_text(self, selectors: list) -> str:
-        """가장 마지막 응답 요소의 텍스트 반환"""
+        """가장 마지막 응답 요소의 텍스트 반환. CSS 실패 시 JS 폴백."""
         for sel in selectors:
             try:
                 els = self.driver.find_elements(By.CSS_SELECTOR, sel)
                 if els:
-                    return els[-1].text.strip()
+                    text = els[-1].text.strip()
+                    if text:
+                        return text
             except (StaleElementReferenceException, Exception):
                 continue
-        return ""
+        try:
+            return self.driver.execute_script("""
+                var sels = ['[class*="prose"]', '[class*="markdown"]',
+                            '[data-testid*="message"]', '[class*="response"]',
+                            '[class*="Message"]'];
+                for (var s of sels) {
+                    var els = document.querySelectorAll(s);
+                    if (els.length) {
+                        var t = els[els.length-1].innerText.trim();
+                        if (t.length > 20) return t;
+                    }
+                }
+                return '';
+            """) or ""
+        except Exception:
+            return ""
