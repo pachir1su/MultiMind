@@ -52,6 +52,58 @@ def assets_complete() -> bool:
     return True
 
 
+def _has_content(img: Image.Image) -> bool:
+    """이미지가 공백/단색이 아닌지 확인 (픽셀 표준편차 기반)"""
+    import statistics
+    gray = img.convert("L")
+    pixels = list(gray.getdata())
+    if len(pixels) < 50:
+        return False
+    try:
+        return statistics.stdev(pixels) > 8.0
+    except statistics.StatisticsError:
+        return False
+
+
+def _preview_confirm(parent: tk.Tk, crop: Image.Image, name: str) -> bool:
+    """캡처된 이미지 미리보기 후 사용자 확인. 저장이면 True, 다시 선택이면 False."""
+    win = tk.Toplevel(parent)
+    win.title(f"미리보기 — {name}")
+    win.resizable(False, False)
+    win.grab_set()
+
+    ttk.Label(win, text=f"이 이미지가 맞나요?  [{name}]",
+              font=("맑은 고딕", 10, "bold")).pack(pady=(10, 4))
+
+    # 너무 작은 이미지는 확대해서 보여주기
+    pw, ph = crop.width, crop.height
+    max_side = 320
+    scale = min(max_side / max(pw, ph, 1), 6.0)
+    scale = max(scale, 1.0)
+    disp = crop.resize((int(pw * scale), int(ph * scale)), Image.NEAREST)
+    photo = ImageTk.PhotoImage(disp)
+
+    lbl = tk.Label(win, image=photo, relief="sunken", borderwidth=2)
+    lbl.image = photo
+    lbl.pack(padx=16, pady=8)
+
+    ttk.Label(win, text=f"크기: {pw} × {ph} px", foreground="#888").pack()
+
+    confirmed = tk.BooleanVar(value=False)
+    btn = ttk.Frame(win)
+    btn.pack(pady=(8, 12))
+    ttk.Button(btn, text="다시 선택",
+               command=lambda: (confirmed.set(False), win.destroy())).pack(side="left", padx=10)
+    ttk.Button(btn, text="저장 ✓",
+               command=lambda: (confirmed.set(True), win.destroy())).pack(side="left", padx=10)
+
+    win.bind("<Return>", lambda _: (confirmed.set(True), win.destroy()))
+    win.bind("<Escape>", lambda _: (confirmed.set(False), win.destroy()))
+
+    parent.wait_window(win)
+    return confirmed.get()
+
+
 # ── 영역 선택 창 ───────────────────────────────────────────────────────────────
 
 class RegionSelector(tk.Toplevel):
@@ -296,7 +348,6 @@ class SetupWizard:
         self.root.wait_window(sel)
 
         if sel.result is None:
-            # 취소 → 버튼 복원
             for w in self.btn_row.winfo_children():
                 w.configure(state="normal")
             self.countdown_lbl.configure(text="취소됨. 다시 시도하세요.")
@@ -304,6 +355,27 @@ class SetupWizard:
 
         x1, y1, x2, y2 = sel.result
         crop = screenshot.crop((x1, y1, x2, y2))
+
+        # 공백/단색 이미지 검증
+        if not _has_content(crop):
+            messagebox.showwarning(
+                "이미지 품질 경고",
+                "선택 영역이 너무 단순하거나 공백입니다.\n"
+                "버튼·텍스트·아이콘이 포함된 영역을 선택해주세요.",
+                parent=self.root,
+            )
+            for w in self.btn_row.winfo_children():
+                w.configure(state="normal")
+            self.countdown_lbl.configure(text="다시 시도하세요.")
+            return
+
+        # 미리보기 확인
+        if not _preview_confirm(self.root, crop, name):
+            for w in self.btn_row.winfo_children():
+                w.configure(state="normal")
+            self.countdown_lbl.configure(text="다시 시도하세요.")
+            return
+
         save_path = ASSETS_DIR / llm / f"{key}.png"
         crop.save(save_path)
 
