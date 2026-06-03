@@ -37,28 +37,12 @@ pip install -r requirements.txt
 
 ## 실행 전 준비 (필수)
 
-### 1. 브라우저 로그인
+### 브라우저 로그인
 Chrome/Edge에서 사용할 LLM 사이트에 미리 로그인해두세요:
+<br> Chrome 브라우저를 추천합니다.
 - Claude: https://claude.ai
 - ChatGPT: https://chatgpt.com
 - Gemini: https://gemini.google.com
-
-### 2. 참조 이미지 교체 (필수)
-`assets/screenshots/` 폴더의 placeholder 이미지를 실제 스크린샷으로 교체해야 합니다.
-
-**캡처 방법:**
-1. Windows 디스플레이 배율을 **100%** 로 설정
-2. 브라우저 확대/축소를 **100%** 로 설정
-3. 각 LLM 사이트에서 Windows 캡처 도구(`Win+Shift+S`)로 아래 요소를 캡처:
-
-| 파일명 | 캡처할 UI 요소 | 등장 시점 |
-|--------|----------------|-----------|
-| `input_area.png` | 텍스트 입력창 영역 | 항상 표시 |
-| `send_button_active.png` | 활성화된 전송 버튼 | 텍스트 입력 후 |
-| `send_button_inactive.png` | 비활성/로딩 전송 버튼 | 응답 생성 중 |
-| `copy_button.png` | 응답 복사 버튼 | 응답 완료 후 |
-
-4. 위 파일을 `assets/screenshots/<llm>/` 폴더에 덮어쓰기
 
 ---
 
