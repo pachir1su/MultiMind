@@ -1,8 +1,8 @@
 """
-undetected-chromedriver 기반 LLM 드라이버.
-- Cloudflare / 봇 감지 우회
-- 기존 Chrome 프로필 쿠키 복사 → 로그인 세션 재사용
-- 기존 Chrome이 열려 있든 없든 독립 실행
+멀티 브라우저 LLM 드라이버 모듈.
+- Chrome (undetected-chromedriver): Cloudflare/봇 감지 우회 지원
+- Edge (selenium): Chrome 미설치 시 폴백 브라우저
+- 기존 Chrome 프로필 쿠키 복사로 로그인 세션 재사용
 """
 import os
 import re
@@ -14,12 +14,18 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-from .exceptions import LLMDriverError, MissingDependencyError, ResponseTimeoutError
+from .exceptions import (
+    LLMDriverError, MissingDependencyError,
+    ResponseTimeoutError, BrowserNotFoundError,
+)
+
+# ── 외부 패키지 임포트 (selenium 공통 + uc 선택적) ────────────────────────────
 
 _IMPORT_ERROR: Optional[str] = None
+_UC_AVAILABLE = False
 
+# Selenium 공통 모듈 임포트
 try:
-    import undetected_chromedriver as uc
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
@@ -31,17 +37,35 @@ try:
 except ModuleNotFoundError as _e:
     _IMPORT_ERROR = str(_e)
 
-# ── 프로필 경로 ────────────────────────────────────────────────────────────────
+# undetected-chromedriver 임포트 (Chrome 전용, 봇 감지 우회)
+try:
+    import undetected_chromedriver as uc
+    _UC_AVAILABLE = True
+except ModuleNotFoundError:
+    pass
+
+# OS별 단축키 수정자 키 (macOS: Cmd, Windows/Linux: Ctrl)
+_MOD_KEY = None
+if _IMPORT_ERROR is None:
+    _MOD_KEY = Keys.COMMAND if sys.platform == "darwin" else Keys.CONTROL
+
+# ── Chrome 프로필 경로 ────────────────────────────────────────────────────────
 if sys.platform == "win32":
     _local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
     _CHROME_USER_DATA = _local / "Google" / "Chrome" / "User Data"
     CHROME_PROFILE_DIR = str(_local / "MultiMind" / "ChromeProfile")
+    _EDGE_USER_DATA = _local / "Microsoft" / "Edge" / "User Data"
+    EDGE_PROFILE_DIR = str(_local / "MultiMind" / "EdgeProfile")
 elif sys.platform == "darwin":
     _CHROME_USER_DATA = Path.home() / "Library" / "Application Support" / "Google" / "Chrome"
     CHROME_PROFILE_DIR = str(Path.home() / ".multimind" / "chrome-profile")
+    _EDGE_USER_DATA = Path.home() / "Library" / "Application Support" / "Microsoft Edge"
+    EDGE_PROFILE_DIR = str(Path.home() / ".multimind" / "edge-profile")
 else:
     _CHROME_USER_DATA = Path.home() / ".config" / "google-chrome"
     CHROME_PROFILE_DIR = str(Path.home() / ".multimind" / "chrome-profile")
+    _EDGE_USER_DATA = Path.home() / ".config" / "microsoft-edge"
+    EDGE_PROFILE_DIR = str(Path.home() / ".multimind" / "edge-profile")
 
 # ── LLM URL ───────────────────────────────────────────────────────────────────
 LLM_URLS = {
@@ -50,7 +74,7 @@ LLM_URLS = {
     "gemini":  "https://gemini.google.com/app",
 }
 
-# ── CSS 셀렉터 (앞에서부터 순서대로 시도) ────────────────────────────────────────
+# ── CSS 셀렉터 (앞에서부터 순서대로 시도) ────────────────────────────────────
 _INPUT = {
     "claude":  [
         'div.ProseMirror[contenteditable="true"]',
@@ -120,23 +144,24 @@ _RESPONSE = {
     ],
 }
 
-# 로그인 페이지로 판단하는 URL 키워드
+# 로그인 페이지 URL 키워드
 _LOGIN_URL_KEYWORDS = ["login", "signin", "sign-in", "auth", "accounts.google"]
 
-# CDP URL 매칭용 도메인 맵
+# CDP URL 매칭용 LLM 도메인
 _LLM_DOMAINS = {
     "claude": ["claude.ai"],
     "chatgpt": ["chatgpt.com", "chat.openai.com"],
     "gemini": ["gemini.google.com", "accounts.google.com"],
 }
 
+# ── 타임아웃 상수 ─────────────────────────────────────────────────────────────
 ELEMENT_WAIT  = 20
 STABLE_SECS   = 3
 RESPONSE_TIMEOUT = 300
-LOGIN_POLL_INTERVAL = 10  # 로그인 확인 주기 (초)
-LOGIN_TIMEOUT  = 300      # 로그인 최대 대기 (초)
+LOGIN_POLL_INTERVAL = 10
+LOGIN_TIMEOUT  = 300
 
-# Shadow DOM을 관통하여 입력 요소를 찾고 텍스트를 설정하는 JS
+# ── JavaScript: Shadow DOM 관통 입력 ──────────────────────────────────────────
 _JS_SET_TEXT = """
 var text = arguments[0];
 function findInput() {
@@ -166,6 +191,7 @@ input.dispatchEvent(new Event('input', {bubbles: true}));
 return true;
 """
 
+# JavaScript: 전송 버튼 탐색
 _JS_FIND_SEND = """
 var sels = ['button[aria-label="Send message"]',
             'button[aria-label="Send Message"]',
@@ -201,7 +227,7 @@ for (var b of allBtns) {
 return null;
 """
 
-
+# 세션 복사 대상 파일 목록
 _SESSION_FILES = [
     "Cookies", "Cookies-journal", "Cookies-wal", "Cookies-shm",
     "Login Data", "Login Data-journal", "Login Data-wal", "Login Data-shm",
@@ -211,8 +237,10 @@ _SESSION_FILES = [
 ]
 
 
-def _is_profile_locked() -> bool:
-    """Chrome User Data 디렉토리가 다른 인스턴스에 잠겨있는지 확인."""
+# ── 모듈 레벨 유틸리티 함수 ───────────────────────────────────────────────────
+
+def _isProfileLocked() -> bool:
+    """Chrome User Data 디렉토리가 다른 인스턴스에 잠겨있는지 확인"""
     for name in ["lockfile", "SingletonLock"]:
         p = _CHROME_USER_DATA / name
         try:
@@ -223,13 +251,11 @@ def _is_profile_locked() -> bool:
     return False
 
 
-def _sync_cookies(log_fn=None) -> None:
-    """메인 Chrome 세션을 MultiMind 전용 프로필로 복사 (최초 1회만).
-    이미 세션이 존재하면 기존 로그인을 보존하기 위해 건너뜀.
-    """
-    _log = log_fn or (lambda m: None)
-    src_default = _CHROME_USER_DATA / "Default"
-    if not src_default.exists():
+def _syncCookies(logFn=None) -> None:
+    """메인 Chrome 세션을 MultiMind 전용 프로필로 복사 (최초 1회만 실행)"""
+    _log = logFn or (lambda m: None)
+    srcDefault = _CHROME_USER_DATA / "Default"
+    if not srcDefault.exists():
         _log("Chrome Default 프로필을 찾을 수 없음")
         return
 
@@ -240,69 +266,70 @@ def _sync_cookies(log_fn=None) -> None:
         _log("기존 MultiMind 세션 유지 (이전 로그인 보존)")
         return
 
-    # 최초 실행: 메인 Chrome에서 세션 복사
+    # 최초 실행: 메인 Chrome에서 세션 파일 복사
     _log("최초 세션 복사 중 (메인 Chrome에서 복사)...")
     dst.mkdir(parents=True, exist_ok=True)
-    copied, failed_names = 0, []
+    copied, failedNames = 0, []
 
-    # Local State (쿠키 암호화 키 포함)
-    src_ls = _CHROME_USER_DATA / "Local State"
-    dst_ls = Path(CHROME_PROFILE_DIR) / "Local State"
-    if src_ls.exists():
+    # Local State 파일 복사 (쿠키 암호화 키 포함)
+    srcLs = _CHROME_USER_DATA / "Local State"
+    dstLs = Path(CHROME_PROFILE_DIR) / "Local State"
+    if srcLs.exists():
         try:
-            shutil.copy2(str(src_ls), str(dst_ls))
+            shutil.copy2(str(srcLs), str(dstLs))
             copied += 1
         except OSError:
-            failed_names.append("Local State")
+            failedNames.append("Local State")
 
-    # 세션/쿠키 파일 (항상 최신으로 덮어씀)
+    # 세션/쿠키 파일 복사
     for fname in _SESSION_FILES:
-        src_file = src_default / fname
-        dst_file = dst / fname
-        if src_file.exists():
+        srcFile = srcDefault / fname
+        dstFile = dst / fname
+        if srcFile.exists():
             try:
-                shutil.copy2(str(src_file), str(dst_file))
+                shutil.copy2(str(srcFile), str(dstFile))
                 copied += 1
             except OSError:
-                failed_names.append(fname)
+                failedNames.append(fname)
 
-    # 세션 관련 디렉토리
+    # 세션 관련 디렉토리 복사 (Local Storage, Session Storage)
     for dirname in ["Local Storage", "Session Storage"]:
-        src_dir = src_default / dirname
-        dst_dir = dst / dirname
-        if src_dir.exists():
-            if dst_dir.exists():
-                shutil.rmtree(str(dst_dir), ignore_errors=True)
+        srcDir = srcDefault / dirname
+        dstDir = dst / dirname
+        if srcDir.exists():
+            if dstDir.exists():
+                shutil.rmtree(str(dstDir), ignore_errors=True)
             try:
-                shutil.copytree(str(src_dir), str(dst_dir))
+                shutil.copytree(str(srcDir), str(dstDir))
                 copied += 1
             except OSError:
-                failed_names.append(dirname)
+                failedNames.append(dirname)
 
-    # Network 디렉토리 내 Cookies (최신 Chrome)
-    src_net = src_default / "Network"
-    dst_net = dst / "Network"
-    if src_net.exists():
-        dst_net.mkdir(parents=True, exist_ok=True)
+    # Network 디렉토리 내 쿠키 파일 복사 (최신 Chrome 구조)
+    srcNet = srcDefault / "Network"
+    dstNet = dst / "Network"
+    if srcNet.exists():
+        dstNet.mkdir(parents=True, exist_ok=True)
         for fname in ["Cookies", "Cookies-journal", "Cookies-wal", "Cookies-shm"]:
-            src_file = src_net / fname
-            dst_file = dst_net / fname
-            if src_file.exists():
+            srcFile = srcNet / fname
+            dstFile = dstNet / fname
+            if srcFile.exists():
                 try:
-                    shutil.copy2(str(src_file), str(dst_file))
+                    shutil.copy2(str(srcFile), str(dstFile))
                     copied += 1
                 except OSError:
-                    failed_names.append(f"Network/{fname}")
+                    failedNames.append(f"Network/{fname}")
 
     msg = f"세션 파일 복사: {copied}개 성공"
-    if failed_names:
-        msg += f", {len(failed_names)}개 실패 ({', '.join(failed_names)})"
+    if failedNames:
+        msg += f", {len(failedNames)}개 실패 ({', '.join(failedNames)})"
     _log(msg)
 
 
-def _detect_chrome_version() -> Optional[int]:
-    """설치된 Chrome의 메이저 버전 번호를 감지."""
+def _detectChromeVersion() -> Optional[int]:
+    """설치된 Chrome의 메이저 버전 번호를 감지"""
     if sys.platform == "win32":
+        # Windows 레지스트리에서 버전 확인
         try:
             result = subprocess.run(
                 ["reg", "query",
@@ -316,6 +343,7 @@ def _detect_chrome_version() -> Optional[int]:
         except Exception:
             pass
     else:
+        # Linux/macOS: CLI로 버전 확인
         for cmd in ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"]:
             try:
                 result = subprocess.run(
@@ -329,26 +357,96 @@ def _detect_chrome_version() -> Optional[int]:
     return None
 
 
-def _parse_version_from_error(error_msg: str) -> Optional[int]:
-    """버전 불일치 에러 메시지에서 실제 Chrome 버전을 추출."""
-    m = re.search(r"Current browser version is (\d+)", error_msg)
+def _detectEdgeVersion() -> Optional[int]:
+    """설치된 Edge의 메이저 버전 번호를 감지"""
+    if sys.platform == "win32":
+        # Windows 레지스트리에서 Edge 버전 확인
+        try:
+            result = subprocess.run(
+                ["reg", "query",
+                 r"HKEY_CURRENT_USER\Software\Microsoft\Edge\BLBeacon",
+                 "/v", "version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            m = re.search(r"(\d+)\.", result.stdout)
+            if m:
+                return int(m.group(1))
+        except Exception:
+            pass
+        # 실행 파일 직접 확인
+        for edgePath in [
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        ]:
+            if os.path.exists(edgePath):
+                return 1
+    elif sys.platform == "darwin":
+        # macOS: Edge 실행 파일 확인
+        edgePath = "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+        if os.path.exists(edgePath):
+            try:
+                result = subprocess.run(
+                    [edgePath, "--version"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                m = re.search(r"(\d+)\.", result.stdout)
+                if m:
+                    return int(m.group(1))
+            except Exception:
+                return 1
+    else:
+        # Linux: CLI로 Edge 버전 확인
+        for cmd in ["microsoft-edge-stable", "microsoft-edge", "microsoft-edge-dev"]:
+            try:
+                result = subprocess.run(
+                    [cmd, "--version"], capture_output=True, text=True, timeout=10,
+                )
+                m = re.search(r"(\d+)\.", result.stdout)
+                if m:
+                    return int(m.group(1))
+            except Exception:
+                continue
+    return None
+
+
+def _detectBrowser() -> tuple:
+    """사용 가능한 브라우저 탐지 (Chrome 우선, Edge 폴백)"""
+    chromeVer = _detectChromeVersion()
+    if chromeVer:
+        return ("chrome", chromeVer)
+
+    edgeVer = _detectEdgeVersion()
+    if edgeVer:
+        return ("edge", edgeVer)
+
+    return (None, None)
+
+
+def _parseVersionFromError(errorMsg: str) -> Optional[int]:
+    """버전 불일치 에러 메시지에서 실제 Chrome 버전을 추출"""
+    m = re.search(r"Current browser version is (\d+)", errorMsg)
     return int(m.group(1)) if m else None
 
 
+# ── LLM 드라이버 클래스 ──────────────────────────────────────────────────────
+
 class LLMDriver:
-    """undetected-chromedriver 기반 멀티탭 LLM 드라이버."""
+    """멀티탭 브라우저 기반 LLM 드라이버 (Chrome/Edge 지원)"""
 
-    def __init__(self, log_fn=None):
-        self._log = log_fn or (lambda m: None)
-        self._send_lock = threading.Lock()
+    def __init__(self, logFn=None):
+        self._log = logFn or (lambda m: None)
+        self._sendLock = threading.Lock()
         self._baselines: dict[str, str] = {}
-        self.driver = None  # uc.Chrome when running
+        self.driver = None
         self._tabs: dict[str, str] = {}
+        # 현재 사용 중인 브라우저 종류 ("chrome" 또는 "edge")
+        self._browserType = "chrome"
 
-    # ── 초기화 ─────────────────────────────────────────────────────────────────
+    # ── 브라우저 초기화 ───────────────────────────────────────────────────────
 
     def start(self) -> None:
-        """Chrome 시작 (기존 프로필 우선 사용, 봇 감지 우회)"""
+        """브라우저 시작 — Chrome 우선, Edge 폴백"""
+        # 필수 패키지 확인
         if _IMPORT_ERROR is not None:
             pkg = _IMPORT_ERROR.replace("No module named ", "").strip("'\"")
             raise MissingDependencyError(
@@ -356,47 +454,78 @@ class LLMDriver:
                 "pip install selenium undetected-chromedriver pyperclip",
             )
 
-        version_main = _detect_chrome_version()
-        if version_main:
-            self._log(f"Chrome 버전 {version_main} 감지됨")
+        # 사용 가능한 브라우저 탐지
+        browserType, browserVersion = _detectBrowser()
 
-        def _build_options(data_dir):
+        if browserType == "chrome" and _UC_AVAILABLE:
+            # Chrome + undetected-chromedriver: 봇 감지 우회 모드
+            self._startChrome(browserVersion)
+        elif browserType == "edge":
+            # Edge 폴백: 봇 감지 우회 없음
+            self._log(
+                "Chrome이 설치되어 있지 않습니다.\n"
+                "  → Edge 브라우저로 대체 실행합니다.\n"
+                "  → 주의: 봇 감지 우회가 비활성화되어 일부 사이트에서 제한될 수 있습니다."
+            )
+            self._startEdge()
+        elif browserType == "chrome" and not _UC_AVAILABLE:
+            # Chrome은 있으나 undetected-chromedriver 미설치
+            raise MissingDependencyError(
+                "undetected-chromedriver",
+                "pip install undetected-chromedriver",
+            )
+        else:
+            # 지원 브라우저 없음
+            raise BrowserNotFoundError()
+
+        self.driver.set_page_load_timeout(60)
+
+    def _startChrome(self, versionMain: Optional[int]) -> None:
+        """Chrome 브라우저 시작 (undetected-chromedriver, 봇 감지 우회)"""
+        self._browserType = "chrome"
+
+        if versionMain:
+            self._log(f"Chrome 버전 {versionMain} 감지됨")
+
+        # Chrome 옵션 생성 헬퍼
+        def _buildOptions(dataDir):
             opts = uc.ChromeOptions()
-            opts.add_argument(f"--user-data-dir={data_dir}")
+            opts.add_argument(f"--user-data-dir={dataDir}")
             opts.add_argument("--profile-directory=Default")
             opts.add_argument("--no-first-run")
             opts.add_argument("--no-default-browser-check")
             opts.add_argument("--disable-popup-blocking")
             return opts
 
-        def _try_launch(data_dir, ver=version_main):
-            kwargs = dict(options=_build_options(data_dir), use_subprocess=True)
+        # Chrome 실행 시도 헬퍼
+        def _tryLaunch(dataDir, ver=versionMain):
+            kwargs = dict(options=_buildOptions(dataDir), use_subprocess=True)
             if ver:
                 kwargs["version_main"] = ver
             return uc.Chrome(**kwargs)
 
-        profile_locked = _is_profile_locked()
+        profileLocked = _isProfileLocked()
 
-        if not profile_locked:
-            # 프로필 잠금 없음 → 기존 프로필 직접 사용
+        # 프로필 잠금 없음 → 기존 Chrome 프로필 직접 사용
+        if not profileLocked:
             self._log("기존 Chrome 프로필로 시작 중...")
             try:
-                self.driver = _try_launch(str(_CHROME_USER_DATA))
+                self.driver = _tryLaunch(str(_CHROME_USER_DATA))
                 self._log("기존 Chrome 프로필 연결 성공 (로그인 세션 유지)")
             except Exception as e:
                 self.driver = None
-                parsed_ver = _parse_version_from_error(str(e))
-                if parsed_ver and parsed_ver != version_main:
+                parsedVer = _parseVersionFromError(str(e))
+                if parsedVer and parsedVer != versionMain:
                     try:
-                        self.driver = _try_launch(str(_CHROME_USER_DATA), parsed_ver)
-                        version_main = parsed_ver
+                        self.driver = _tryLaunch(str(_CHROME_USER_DATA), parsedVer)
+                        versionMain = parsedVer
                         self._log("기존 Chrome 프로필 연결 성공 (로그인 세션 유지)")
                     except Exception:
                         pass
 
+        # 프로필 잠김 또는 기존 프로필 실패 → 별도 프로필 사용
         if self.driver is None:
-            # 프로필 잠김 or 기존 프로필 실패 → 별도 프로필 + 세션 복사
-            if profile_locked:
+            if profileLocked:
                 self._log(
                     "Chrome이 실행 중 — 별도 프로필로 시작합니다\n"
                     "  → 팁: Chrome을 완전히 종료(시스템 트레이 포함)한 후 실행하면 자동 로그인됩니다."
@@ -404,25 +533,56 @@ class LLMDriver:
             else:
                 self._log("기존 프로필 사용 실패 — 별도 프로필로 시작합니다")
             Path(CHROME_PROFILE_DIR).mkdir(parents=True, exist_ok=True)
-            _sync_cookies(log_fn=self._log)
+            _syncCookies(logFn=self._log)
             try:
-                self.driver = _try_launch(CHROME_PROFILE_DIR)
+                self.driver = _tryLaunch(CHROME_PROFILE_DIR)
             except Exception as e:
-                parsed_ver = _parse_version_from_error(str(e))
-                if parsed_ver and parsed_ver != version_main:
+                parsedVer = _parseVersionFromError(str(e))
+                if parsedVer and parsedVer != versionMain:
                     try:
-                        self.driver = _try_launch(CHROME_PROFILE_DIR, parsed_ver)
+                        self.driver = _tryLaunch(CHROME_PROFILE_DIR, parsedVer)
                     except Exception as e2:
                         raise LLMDriverError("chrome", f"Chrome 시작 실패: {e2}")
                 else:
                     raise LLMDriverError("chrome", f"Chrome 시작 실패: {e}")
 
-        self.driver.set_page_load_timeout(60)
         self._log("Chrome 시작됨 (봇 감지 우회 활성화)")
 
-    def open_tabs(self, llm_names: list) -> None:
-        """각 LLM을 새 탭으로 열기 (Selenium WebDriver 기반, 페이지 로드 대기)"""
-        for i, name in enumerate(llm_names):
+    def _startEdge(self) -> None:
+        """Edge 브라우저 시작 (selenium 표준 WebDriver, 봇 감지 우회 없음)"""
+        self._browserType = "edge"
+
+        try:
+            from selenium.webdriver import Edge
+            from selenium.webdriver.edge.options import Options as EdgeOptions
+        except ImportError:
+            raise LLMDriverError("edge", "selenium Edge 드라이버를 로드할 수 없습니다.")
+
+        # Edge 옵션 설정 (Chromium 기반으로 Chrome과 동일한 옵션 지원)
+        opts = EdgeOptions()
+        edgeProfileDir = EDGE_PROFILE_DIR
+        Path(edgeProfileDir).mkdir(parents=True, exist_ok=True)
+        opts.add_argument(f"--user-data-dir={edgeProfileDir}")
+        opts.add_argument("--profile-directory=Default")
+        opts.add_argument("--no-first-run")
+        opts.add_argument("--no-default-browser-check")
+        opts.add_argument("--disable-popup-blocking")
+
+        try:
+            self.driver = Edge(options=opts)
+        except Exception as e:
+            raise LLMDriverError("edge", f"Edge 시작 실패: {e}")
+
+        self._log(
+            "Edge 브라우저 시작됨\n"
+            "  → 각 LLM에 직접 로그인이 필요합니다."
+        )
+
+    # ── 탭 관리 ───────────────────────────────────────────────────────────────
+
+    def openTabs(self, llmNames: list) -> None:
+        """각 LLM을 새 탭으로 열고 페이지 로드 대기"""
+        for i, name in enumerate(llmNames):
             url = LLM_URLS[name]
             if i == 0:
                 self.driver.get(url)
@@ -430,6 +590,7 @@ class LLMDriver:
                 self.driver.switch_to.new_window("tab")
                 self.driver.get(url)
             self._tabs[name] = self.driver.current_window_handle
+            # 페이지 로드 완료 대기
             try:
                 WebDriverWait(self.driver, 30).until(
                     lambda d: d.execute_script("return document.readyState") == "complete"
@@ -439,43 +600,48 @@ class LLMDriver:
             self._log(f"[{name}] 탭 열림 — {self.driver.title}")
             time.sleep(1.5)
 
-    def _check_login_cdp(self, llm_names: list) -> Optional[list]:
-        """CDP로 탭 전환 없이 로그인 상태 확인. 로그인 필요한 LLM 목록 반환.
-        CDP 미지원 시 None 반환.
-        """
+    def switchToTab(self, llmName: str) -> None:
+        """지정된 LLM의 탭으로 전환"""
+        handle = self._tabs.get(llmName)
+        if handle and self.driver.current_window_handle != handle:
+            self.driver.switch_to.window(handle)
+
+    # ── 로그인 확인 ───────────────────────────────────────────────────────────
+
+    def _checkLoginCdp(self, llmNames: list) -> Optional[list]:
+        """CDP로 탭 전환 없이 로그인 상태 확인, 로그인 필요한 LLM 목록 반환"""
         try:
             targets = self.driver.execute_cdp_cmd("Target.getTargets", {})
         except Exception:
             return None
 
-        page_urls: dict[str, str] = {}
+        pageUrls: dict[str, str] = {}
         for info in targets.get("targetInfos", []):
             if info.get("type") == "page":
                 url = info.get("url", "").lower()
                 for name, domains in _LLM_DOMAINS.items():
                     if any(d in url for d in domains):
-                        page_urls[name] = url
+                        pageUrls[name] = url
 
         pending = []
-        for name in llm_names:
-            url = page_urls.get(name, "")
+        for name in llmNames:
+            url = pageUrls.get(name, "")
             if not url or any(k in url for k in _LOGIN_URL_KEYWORDS):
                 pending.append(name)
         return pending
 
-    def wait_for_login(self, llm_names: list) -> None:
-        """로그인이 필요한 LLM을 감지하고, 모두 로그인될 때까지 대기.
-        CDP를 사용하여 탭 전환 없이 URL만 확인 — 브라우저 깜빡임 방지.
-        """
+    def waitForLogin(self, llmNames: list) -> None:
+        """로그인 필요한 LLM을 감지하고 모두 로그인될 때까지 대기"""
         deadline = time.time() + LOGIN_TIMEOUT
 
-        pending = self._check_login_cdp(llm_names)
+        # CDP로 로그인 상태 확인 (탭 전환 없이)
+        pending = self._checkLoginCdp(llmNames)
         if pending is None:
-            pending = [n for n in llm_names if not self._check_logged_in(n)]
+            pending = [n for n in llmNames if not self._checkLoggedIn(n)]
 
         if not pending:
-            self._log("모든 LLM 로그인 확인 완료 ✓")
-            self._verify_ready(llm_names)
+            self._log("모든 LLM 로그인 확인 완료")
+            self._verifyReady(llmNames)
             return
 
         self._log(
@@ -484,35 +650,38 @@ class LLMDriver:
             "  → 탭이 전환되지 않으니 편하게 로그인하세요."
         )
 
-        last_status_log = time.time()
+        lastStatusLog = time.time()
         while time.time() < deadline:
             time.sleep(LOGIN_POLL_INTERVAL)
 
-            pending = self._check_login_cdp(llm_names)
+            # 주기적으로 로그인 상태 재확인
+            pending = self._checkLoginCdp(llmNames)
             if pending is None:
-                pending = [n for n in llm_names if not self._check_logged_in(n)]
+                pending = [n for n in llmNames if not self._checkLoggedIn(n)]
 
             if not pending:
-                self._log("모든 LLM 로그인 확인 완료 ✓")
-                self._verify_ready(llm_names)
+                self._log("모든 LLM 로그인 확인 완료")
+                self._verifyReady(llmNames)
                 return
 
+            # 30초마다 상태 로그 출력
             now = time.time()
-            if now - last_status_log >= 30:
+            if now - lastStatusLog >= 30:
                 remaining = int(deadline - now)
                 self._log(f"로그인 대기 중: {', '.join(pending)} (남은 시간: {remaining}초)")
-                last_status_log = now
+                lastStatusLog = now
 
-        self._log("⚠ 일부 LLM이 아직 로그인되지 않았습니다. 계속 진행합니다.")
+        self._log("일부 LLM이 아직 로그인되지 않았습니다. 계속 진행합니다.")
 
-    def _verify_ready(self, llm_names: list) -> None:
-        """각 LLM 탭의 입력창이 실제로 준비될 때까지 대기. 미발견 시 새로고침."""
+    def _verifyReady(self, llmNames: list) -> None:
+        """각 LLM 탭의 입력창이 준비될 때까지 대기, 미발견 시 새로고침"""
         self._log("각 LLM 입력창 확인 중...")
-        for name in llm_names:
-            self.switch_to(name)
-            if self._find_any(_INPUT[name], 15):
+        for name in llmNames:
+            self.switchToTab(name)
+            if self._findAny(_INPUT[name], 15):
                 self._log(f"[{name}] 입력창 준비 완료")
                 continue
+            # 입력창 미발견 → 새로고침 후 재시도
             self._log(f"[{name}] 입력창 미발견 — 페이지 새로고침")
             self.driver.refresh()
             try:
@@ -521,51 +690,47 @@ class LLMDriver:
                 )
             except (TimeoutException, Exception):
                 pass
-            if self._find_any(_INPUT[name], 20):
+            if self._findAny(_INPUT[name], 20):
                 self._log(f"[{name}] 새로고침 후 준비 완료")
             else:
-                self._log(f"[{name}] ⚠ 입력창 없음 — 프롬프트 전송 시 재시도 예정")
+                self._log(f"[{name}] 입력창 없음 — 프롬프트 전송 시 재시도 예정")
 
-    def switch_to(self, llm_name: str) -> None:
-        handle = self._tabs.get(llm_name)
-        if handle and self.driver.current_window_handle != handle:
-            self.driver.switch_to.window(handle)
+    # ── 프롬프트 전송 ─────────────────────────────────────────────────────────
 
-    # ── 핵심 작업 ──────────────────────────────────────────────────────────────
-
-    def send_prompt(self, llm_name: str, prompt: str) -> None:
+    def sendPrompt(self, llmName: str, prompt: str) -> None:
         """프롬프트 입력 및 전송 (직렬화, CSS → JS 폴백 → 새로고침 재시도)"""
-        with self._send_lock:
-            self.switch_to(llm_name)
-            self._baselines[llm_name] = self._get_last_text(_RESPONSE[llm_name])
+        with self._sendLock:
+            self.switchToTab(llmName)
+            self._baselines[llmName] = self._getLastText(_RESPONSE[llmName])
 
+            # 최대 2회 시도 (실패 시 JS 폴백 → 새로고침 후 재시도)
             for attempt in range(2):
                 try:
-                    self._do_send(llm_name, prompt)
-                    self._log(f"[{llm_name}] 전송 완료")
+                    self._doSend(llmName, prompt)
+                    self._log(f"[{llmName}] 전송 완료")
                     return
                 except (NoSuchElementException, StaleElementReferenceException):
                     if attempt == 0:
-                        self._log(f"[{llm_name}] 요소 접근 실패 — JS 폴백 시도")
-                        if self._do_send_js(llm_name, prompt):
-                            self._log(f"[{llm_name}] JS 전송 완료")
+                        self._log(f"[{llmName}] 요소 접근 실패 — JS 폴백 시도")
+                        if self._doSendJs(llmName, prompt):
+                            self._log(f"[{llmName}] JS 전송 완료")
                             return
-                        self._log(f"[{llm_name}] JS 폴백 실패 — 새로고침 후 재시도")
+                        self._log(f"[{llmName}] JS 폴백 실패 — 새로고침 후 재시도")
                         self.driver.refresh()
                         time.sleep(3)
 
             raise LLMDriverError(
-                llm_name,
+                llmName,
                 "입력창을 찾을 수 없습니다. 해당 LLM 탭에서 로그인되어 있는지 확인하세요."
             )
 
-    def _do_send(self, llm_name: str, prompt: str) -> None:
-        """CSS 셀렉터 기반 프롬프트 전송"""
-        input_el = self._find_any(_INPUT[llm_name], ELEMENT_WAIT)
+    def _doSend(self, llmName: str, prompt: str) -> None:
+        """CSS 셀렉터 기반 프롬프트 입력 및 전송"""
+        inputEl = self._findAny(_INPUT[llmName], ELEMENT_WAIT)
 
-        # Gemini Shadow DOM 내부 입력창 탐색
-        if input_el is None and llm_name == "gemini":
-            input_el = self.driver.execute_script("""
+        # Gemini: Shadow DOM 내부 입력창 탐색
+        if inputEl is None and llmName == "gemini":
+            inputEl = self.driver.execute_script("""
                 var rt = document.querySelector('rich-textarea');
                 if (!rt) return null;
                 var root = rt.shadowRoot || rt;
@@ -574,52 +739,53 @@ class LLMDriver:
                     || root.querySelector('[contenteditable="true"]');
             """)
 
-        if input_el is None:
+        if inputEl is None:
             raise NoSuchElementException("입력창 미발견")
 
-        input_el.click()
+        # 텍스트 입력: 기존 내용 전체 선택 → 삭제 → 클립보드 붙여넣기
+        inputEl.click()
         time.sleep(0.3)
-        input_el.send_keys(Keys.CONTROL, "a")
+        inputEl.send_keys(_MOD_KEY, "a")
         time.sleep(0.1)
-        input_el.send_keys(Keys.DELETE)
+        inputEl.send_keys(Keys.DELETE)
         time.sleep(0.1)
 
         pyperclip.copy(prompt)
-        input_el.send_keys(Keys.CONTROL, "v")
+        inputEl.send_keys(_MOD_KEY, "v")
         time.sleep(0.5)
 
-        # Gemini: CDP Enter 키로 전송 (버튼 클릭이 Gemini에서 작동 안 함)
-        if llm_name == "gemini":
-            input_el.click()
+        # Gemini: CDP Enter 키로 전송 (버튼 클릭이 안정적이지 않음)
+        if llmName == "gemini":
+            inputEl.click()
             time.sleep(0.2)
-            if not self._send_enter_cdp():
-                input_el.send_keys(Keys.RETURN)
+            if not self._sendEnterCdp():
+                inputEl.send_keys(Keys.RETURN)
             return
 
-        # 기타 LLM: 전송 버튼 클릭
-        send_el = self._find_any(_SEND[llm_name], 10)
-        if send_el is None:
-            send_el = self.driver.execute_script(_JS_FIND_SEND)
+        # Claude/ChatGPT: 전송 버튼 클릭
+        sendEl = self._findAny(_SEND[llmName], 10)
+        if sendEl is None:
+            sendEl = self.driver.execute_script(_JS_FIND_SEND)
 
-        if send_el:
+        if sendEl:
             from selenium.webdriver.common.action_chains import ActionChains
             try:
-                ActionChains(self.driver).move_to_element(send_el).pause(0.2).click().perform()
+                ActionChains(self.driver).move_to_element(sendEl).pause(0.2).click().perform()
             except Exception:
-                input_el.send_keys(Keys.RETURN)
+                inputEl.send_keys(Keys.RETURN)
         else:
-            input_el.send_keys(Keys.RETURN)
+            inputEl.send_keys(Keys.RETURN)
 
-    def _do_send_js(self, llm_name: str, prompt: str) -> bool:
-        """JavaScript 텍스트 입력 + 전송"""
+    def _doSendJs(self, llmName: str, prompt: str) -> bool:
+        """JavaScript 폴백 — 텍스트 입력 + 전송"""
         try:
             if not self.driver.execute_script(_JS_SET_TEXT, prompt):
                 return False
             time.sleep(1.0)
 
             # Gemini: CDP Enter 키로 전송
-            if llm_name == "gemini":
-                if self._send_enter_cdp():
+            if llmName == "gemini":
+                if self._sendEnterCdp():
                     return True
                 from selenium.webdriver.common.action_chains import ActionChains
                 ActionChains(self.driver).send_keys(Keys.RETURN).perform()
@@ -627,75 +793,87 @@ class LLMDriver:
 
             from selenium.webdriver.common.action_chains import ActionChains
 
-            # 기타 LLM: 전송 버튼 클릭
+            # 전송 버튼 클릭 시도
             sendBtn = self.driver.execute_script(_JS_FIND_SEND)
             if sendBtn:
                 ActionChains(self.driver).move_to_element(sendBtn).pause(0.3).click().perform()
                 return True
 
-            sendEl = self._find_any(_SEND.get(llm_name, []), 5)
+            sendEl = self._findAny(_SEND.get(llmName, []), 5)
             if sendEl:
                 ActionChains(self.driver).move_to_element(sendEl).pause(0.3).click().perform()
                 return True
 
+            # 최후 수단: Enter 키 전송
             ActionChains(self.driver).send_keys(Keys.RETURN).perform()
             return True
         except Exception:
             return False
 
-    def wait_response(self, llm_name: str,
-                      timeout: int = RESPONSE_TIMEOUT,
-                      log_fn=None) -> str:
-        """응답 텍스트가 안정될 때까지 대기 후 반환"""
-        _log = log_fn or self._log
-        selectors = _RESPONSE[llm_name]
-        baseline = self._baselines.pop(llm_name, "")
+    # ── 응답 대기 ─────────────────────────────────────────────────────────────
+
+    def waitResponse(self, llmName: str,
+                     timeout: int = RESPONSE_TIMEOUT,
+                     logFn=None) -> str:
+        """응답 텍스트가 안정(STABLE_SECS초 동안 변동 없음)될 때까지 대기 후 반환"""
+        _log = logFn or self._log
+        selectors = _RESPONSE[llmName]
+        baseline = self._baselines.pop(llmName, "")
         deadline = time.time() + timeout
 
+        # 초기 대기 (LLM 응답 생성 시작 시간 확보)
         time.sleep(3.0)
 
-        last_text = ""
-        stable_count = 0
-        last_log_time = time.time()
-        text_ever_found = False
+        lastText = ""
+        stableCount = 0
+        lastLogTime = time.time()
+        textEverFound = False
 
         while time.time() < deadline:
-            self.switch_to(llm_name)
-            text = self._get_last_text(selectors)
+            self.switchToTab(llmName)
+            text = self._getLastText(selectors)
 
+            # 베이스라인(이전 응답)과 동일하면 무시
             if text and text == baseline:
                 text = ""
 
-            if text and not text_ever_found:
-                text_ever_found = True
-                _log(f"[{llm_name}] 응답 감지 시작 ({len(text)}자)")
+            # 최초 응답 감지 로그
+            if text and not textEverFound:
+                textEverFound = True
+                _log(f"[{llmName}] 응답 감지 시작 ({len(text)}자)")
 
-            if text and text == last_text:
-                stable_count += 1
-                if stable_count >= STABLE_SECS:
-                    _log(f"[{llm_name}] 응답 완료 ({len(text)}자)")
+            # 텍스트 안정성 판단 (STABLE_SECS초 연속 동일 → 완료)
+            if text and text == lastText:
+                stableCount += 1
+                if stableCount >= STABLE_SECS:
+                    _log(f"[{llmName}] 응답 완료 ({len(text)}자)")
                     return text
             else:
-                stable_count = 0
-                last_text = text
+                stableCount = 0
+                lastText = text
 
+            # 10초마다 진행 상황 로그
             now = time.time()
-            if now - last_log_time >= 10:
+            if now - lastLogTime >= 10:
                 elapsed = int(now - (deadline - timeout))
-                if text_ever_found:
-                    _log(f"[{llm_name}] 응답 생성 중... ({elapsed}초, 현재 {len(last_text)}자)")
+                if textEverFound:
+                    _log(f"[{llmName}] 응답 생성 중... ({elapsed}초, 현재 {len(lastText)}자)")
                 else:
-                    _log(f"[{llm_name}] ⚠ 응답 텍스트 미감지 ({elapsed}초) — 셀렉터: {selectors[0]}")
-                last_log_time = now
+                    _log(f"[{llmName}] 응답 텍스트 미감지 ({elapsed}초) — 셀렉터: {selectors[0]}")
+                lastLogTime = now
 
             time.sleep(1.0)
 
-        if last_text:
-            _log(f"[{llm_name}] 타임아웃 — 부분 응답 반환 ({len(last_text)}자)")
-            return last_text
-        raise ResponseTimeoutError(llm_name, timeout)
+        # 타임아웃: 부분 응답이 있으면 반환, 없으면 예외
+        if lastText:
+            _log(f"[{llmName}] 타임아웃 — 부분 응답 반환 ({len(lastText)}자)")
+            return lastText
+        raise ResponseTimeoutError(llmName, timeout)
+
+    # ── 드라이버 종료 ─────────────────────────────────────────────────────────
 
     def quit(self) -> None:
+        """브라우저 드라이버 종료"""
         if self.driver:
             try:
                 self.driver.quit()
@@ -703,9 +881,9 @@ class LLMDriver:
                 pass
             self.driver = None
 
-    # ── 내부 헬퍼 ──────────────────────────────────────────────────────────────
+    # ── 내부 헬퍼 ─────────────────────────────────────────────────────────────
 
-    def _send_enter_cdp(self) -> bool:
+    def _sendEnterCdp(self) -> bool:
         """Chrome DevTools Protocol로 Enter 키 전송 (OS 레벨 입력)"""
         try:
             self.driver.execute_cdp_cmd('Input.dispatchKeyEvent', {
@@ -727,18 +905,18 @@ class LLMDriver:
         except Exception:
             return False
 
-    def _check_logged_in(self, llm_name: str) -> bool:
-        """해당 LLM 탭이 로그인된 상태인지 확인"""
+    def _checkLoggedIn(self, llmName: str) -> bool:
+        """해당 LLM 탭이 로그인된 상태인지 URL 및 입력창으로 확인"""
         try:
-            self.switch_to(llm_name)
+            self.switchToTab(llmName)
             url = self.driver.current_url.lower()
 
-            # 로그인 페이지 URL이면 False
+            # 로그인 페이지 URL이면 미로그인
             if any(k in url for k in _LOGIN_URL_KEYWORDS):
                 return False
 
-            # 입력창이 있으면 로그인된 것으로 판단
-            for sel in _INPUT[llm_name]:
+            # 입력창 존재 여부로 로그인 판단
+            for sel in _INPUT[llmName]:
                 els = self.driver.find_elements(By.CSS_SELECTOR, sel)
                 if els:
                     return True
@@ -746,7 +924,7 @@ class LLMDriver:
             pass
         return False
 
-    def _find_any(self, selectors: list, timeout: float):
+    def _findAny(self, selectors: list, timeout: float):
         """셀렉터 목록을 순서대로 시도해 처음 찾은 요소 반환"""
         per = max(timeout / len(selectors), 2.0)
         for sel in selectors:
@@ -758,8 +936,9 @@ class LLMDriver:
                 continue
         return None
 
-    def _get_last_text(self, selectors: list) -> str:
-        """가장 마지막 응답 요소의 텍스트 반환. CSS 실패 시 JS 폴백."""
+    def _getLastText(self, selectors: list) -> str:
+        """가장 마지막 응답 요소의 텍스트를 반환 (CSS 실패 시 JS 폴백)"""
+        # CSS 셀렉터로 직접 탐색
         for sel in selectors:
             try:
                 els = self.driver.find_elements(By.CSS_SELECTOR, sel)
@@ -769,6 +948,7 @@ class LLMDriver:
                         return text
             except (StaleElementReferenceException, Exception):
                 continue
+        # JS 폴백: 범용 셀렉터로 응답 텍스트 추출
         try:
             return self.driver.execute_script("""
                 var sels = ['[class*="prose"]', '[class*="markdown"]',

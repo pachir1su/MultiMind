@@ -1,21 +1,26 @@
+# Worker LLM 핸들러 모듈 — 단일 LLM에 프롬프트 전송 및 응답 수신
+
 import queue
 from .llm_driver import LLMDriver
 
 
 class WorkerLLMHandler:
-    def __init__(self, llm_name: str, driver: LLMDriver,
-                 event_queue: queue.Queue):
-        self.llm_name = llm_name
+    """Worker LLM 프롬프트 전송/응답 수신 핸들러"""
+
+    def __init__(self, llmName: str, driver: LLMDriver,
+                 eventQueue: queue.Queue):
+        self.llmName = llmName
         self.driver = driver
-        self.event_queue = event_queue
+        self.eventQueue = eventQueue
 
     def _log(self, message: str) -> None:
-        self.event_queue.put({"type": "log", "message": message})
+        """UI 이벤트 큐에 로그 메시지 전송"""
+        self.eventQueue.put({"type": "log", "message": message})
 
-    def send_and_receive(self, prompt: str) -> str:
+    def sendAndReceive(self, prompt: str) -> str:
         """프롬프트 전송 후 응답 텍스트 반환"""
-        self._log(f"[{self.llm_name}] 프롬프트 전송 중...")
-        self.driver.send_prompt(self.llm_name, prompt)
+        self._log(f"[{self.llmName}] 프롬프트 전송 중...")
+        self.driver.sendPrompt(self.llmName, prompt)
 
-        self._log(f"[{self.llm_name}] 응답 대기 중...")
-        return self.driver.wait_response(self.llm_name, log_fn=self._log)
+        self._log(f"[{self.llmName}] 응답 대기 중...")
+        return self.driver.waitResponse(self.llmName, logFn=self._log)
