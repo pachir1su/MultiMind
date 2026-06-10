@@ -1,3 +1,7 @@
+# LLM 프롬프트 템플릿 정의 모듈
+# Head LLM이 사용하는 정제(Phase 1) 및 종합(Phase 3) 템플릿
+
+# Phase 1: 사용자 프롬프트를 Worker별로 최적화하는 정제 템플릿
 REFINEMENT_TEMPLATE = """사용자의 프롬프트를 각 Worker LLM이 최고의 응답을 생성할 수 있도록 최적화하세요.
 
 핵심 규칙:
@@ -13,6 +17,7 @@ Workers: {worker_list}
 정확히 이 형식으로 출력 (JSON 외 텍스트 절대 금지):
 {json_template}"""
 
+# Phase 3: Worker 응답들을 종합하여 최종 답변을 생성하는 템플릿
 SYNTHESIS_TEMPLATE = """당신은 멀티 LLM 오케스트레이터의 Head LLM입니다.
 다음은 여러 Worker LLM들의 응답입니다. 이를 종합하여 최고의 최종 답변을 작성해주세요.
 

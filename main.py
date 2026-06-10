@@ -2,6 +2,7 @@ import sys
 
 
 def main():
+    # tkinter 모듈 로드 시도
     try:
         import tkinter as tk
         from tkinter import messagebox
@@ -13,6 +14,7 @@ def main():
         )
         sys.exit(1)
 
+    # MultiMind 앱 모듈 로드 시도
     try:
         from multimind.app import MultiMindApp
     except ModuleNotFoundError as e:
@@ -26,6 +28,7 @@ def main():
         root.destroy()
         sys.exit(1)
 
+    # Tkinter 루트 윈도우 생성 및 앱 실행
     root = tk.Tk()
     root.minsize(800, 650)
     MultiMindApp(root)
