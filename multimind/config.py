@@ -11,14 +11,14 @@ CONFIG_PATH = Path("config.json")
 # 기본 설정값 (config.json 미존재 또는 파싱 실패 시 사용)
 DEFAULT_CONFIG = {
     "head": "claude",
-    "workers": ["chatgpt", "gemini"],
+    "workers": ["chatgpt", "gemini", "grok", "perplexity"],
     "settings": {
         "open_delay": 3.0,
         "response_timeout": 300,
         "poll_interval": 0.5,
         "dark_mode": False,
     },
-    "window_geometry": "900x700+100+100",
+    "window_geometry": "1000x750+100+100",
 }
 
 

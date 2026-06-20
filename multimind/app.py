@@ -15,6 +15,8 @@ SUPPORTED_LLMS = [
     ("Claude", "claude"),
     ("ChatGPT", "chatgpt"),
     ("Gemini", "gemini"),
+    ("Grok", "grok"),
+    ("Perplexity", "perplexity"),
 ]
 
 # 이벤트 큐 폴링 주기 (밀리초)
@@ -100,7 +102,7 @@ class MultiMindApp:
 
     def _buildUi(self):
         """전체 UI 레이아웃 구축"""
-        self.root.title("MultiMind — 멀티 LLM 오케스트레이터")
+        self.root.title("MultiMind v0.4.0 — 멀티 LLM 오케스트레이터")
         self.root.configure(bg="#f0f2f5")
 
         # 메인 컨테이너 프레임
@@ -116,6 +118,7 @@ class MultiMindApp:
         self._buildWorkerSection(mainFrame)
         self._buildPromptSection(mainFrame)
         self._buildButtonSection(mainFrame)
+        self._buildProgressSection(mainFrame)
         self._buildOutputSection(mainFrame)
         self._buildLogSection(mainFrame)
 
@@ -130,13 +133,20 @@ class MultiMindApp:
 
         titleLabel = ttk.Label(
             headerFrame, text="MultiMind",
-            font=("맑은 고딕", 16, "bold"),
-            foreground="#2c3e50", background="#f0f2f5"
+            font=("맑은 고딕", 18, "bold"),
+            foreground="#1a1a2e", background="#f0f2f5"
         )
         titleLabel.grid(row=0, column=0, sticky="w")
 
+        subtitleLabel = ttk.Label(
+            headerFrame, text="멀티 LLM 오케스트레이터",
+            font=("맑은 고딕", 9),
+            foreground="#7f8c8d", background="#f0f2f5"
+        )
+        subtitleLabel.grid(row=1, column=0, sticky="w")
+
         versionLabel = ttk.Label(
-            headerFrame, text="v0.3.0",
+            headerFrame, text="v0.4.0",
             font=("맑은 고딕", 9),
             foreground="#95a5a6", background="#f0f2f5"
         )
@@ -148,12 +158,15 @@ class MultiMindApp:
                                padding="10")
         frame.grid(row=1, column=0, sticky="ew", pady=(0, 6))
 
+        # 5개 LLM을 2행으로 배치
         for i, (label, key) in enumerate(SUPPORTED_LLMS):
+            row = i // 3
+            col = i % 3
             rb = ttk.Radiobutton(
                 frame, text=f"  {label}", variable=self.headVar, value=key,
                 command=self._onHeadChanged
             )
-            rb.grid(row=0, column=i, padx=16, sticky="w")
+            rb.grid(row=row, column=col, padx=16, pady=2, sticky="w")
 
     def _buildWorkerSection(self, parent):
         """Worker LLM 선택 체크박스 섹션"""
@@ -162,11 +175,14 @@ class MultiMindApp:
         frame.grid(row=2, column=0, sticky="ew", pady=(0, 6))
 
         self.workerCheckboxes = {}
+        # 5개 LLM을 2행으로 배치
         for i, (label, key) in enumerate(SUPPORTED_LLMS):
+            row = i // 3
+            col = i % 3
             cb = ttk.Checkbutton(
                 frame, text=f"  {label}", variable=self.workerVars[key]
             )
-            cb.grid(row=0, column=i, padx=16, sticky="w")
+            cb.grid(row=row, column=col, padx=16, pady=2, sticky="w")
             self.workerCheckboxes[key] = cb
 
     def _buildPromptSection(self, parent):
@@ -230,13 +246,35 @@ class MultiMindApp:
         )
         self.exitButton.pack(side="right")
 
+    def _buildProgressSection(self, parent):
+        """프로그레스 바 섹션 (오케스트레이션 진행 상태 표시)"""
+        self.progressFrame = ttk.Frame(parent)
+        self.progressFrame.grid(row=5, column=0, sticky="ew", pady=(0, 4))
+        self.progressFrame.columnconfigure(0, weight=1)
+
+        self.progressBar = ttk.Progressbar(
+            self.progressFrame, mode="determinate",
+            maximum=100, value=0
+        )
+        self.progressBar.grid(row=0, column=0, sticky="ew")
+
+        self.progressLabel = ttk.Label(
+            self.progressFrame, text="",
+            font=("맑은 고딕", 8), foreground="#7f8c8d",
+            background="#f0f2f5"
+        )
+        self.progressLabel.grid(row=1, column=0, sticky="w")
+
+        # 초기 상태에서는 숨김
+        self.progressFrame.grid_remove()
+
     def _buildOutputSection(self, parent):
         """최종 합성 결과 출력 섹션"""
         frame = ttk.LabelFrame(parent, text="  최종 합성 결과  ", padding="10")
-        frame.grid(row=5, column=0, sticky="nsew", pady=(0, 6))
+        frame.grid(row=6, column=0, sticky="nsew", pady=(0, 6))
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
-        parent.rowconfigure(5, weight=3)
+        parent.rowconfigure(6, weight=3)
 
         self.outputText = tk.Text(
             frame, height=10, wrap="word",
@@ -255,10 +293,10 @@ class MultiMindApp:
     def _buildLogSection(self, parent):
         """진행 로그 출력 섹션 (다크 테마)"""
         frame = ttk.LabelFrame(parent, text="  진행 로그  ", padding="10")
-        frame.grid(row=6, column=0, sticky="nsew")
+        frame.grid(row=7, column=0, sticky="nsew")
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
-        parent.rowconfigure(6, weight=1)
+        parent.rowconfigure(7, weight=1)
 
         self.logText = tk.Text(
             frame, height=6, wrap="word",
@@ -419,10 +457,11 @@ class MultiMindApp:
             self._appendLog(event["message"])
 
         elif eventType == "phase":
-            # Phase 변경 로그 (강조 표시)
+            # Phase 변경 로그 (강조 표시) 및 프로그레스 바 업데이트
             phaseText = f"[Phase {event['phase']}] {event['description']}"
             self._appendLog(phaseText, tag="phase")
             self.statusLabel.configure(text=f"  {event['description']}")
+            self._updateProgress(event["phase"], event["description"])
 
         elif eventType == "worker_done":
             msg = f"[{event['llm'].upper()}] 응답 수신 완료"
@@ -437,6 +476,7 @@ class MultiMindApp:
             self._setOutput(event["text"])
             self._appendLog("오케스트레이션 완료", tag="success")
             self.statusLabel.configure(text="  완료")
+            self._updateProgress(4, "완료")
             self._finish()
 
         elif eventType == "fatal_error":
@@ -458,15 +498,25 @@ class MultiMindApp:
         self._setRunningState(False)
 
     def _setRunningState(self, isRunning: bool):
-        """실행 상태에 따라 버튼 활성/비활성 전환"""
+        """실행 상태에 따라 버튼 활성/비활성 및 프로그레스 바 전환"""
         if isRunning:
             self.runButton.configure(state="disabled")
             self.stopButton.configure(state="normal")
             self.exitButton.configure(state="disabled")
+            self.progressBar["value"] = 0
+            self.progressLabel.configure(text="")
+            self.progressFrame.grid()
         else:
             self.runButton.configure(state="normal")
             self.stopButton.configure(state="disabled")
             self.exitButton.configure(state="normal")
+
+    def _updateProgress(self, phase: int, description: str):
+        """Phase에 따라 프로그레스 바 업데이트 (0~3: 각 25%, 4: 완료)"""
+        phaseProgress = {0: 10, 1: 30, 2: 60, 3: 85, 4: 100}
+        value = phaseProgress.get(phase, 0)
+        self.progressBar["value"] = value
+        self.progressLabel.configure(text=f"  Phase {phase}: {description}")
 
     # ── 텍스트 위젯 헬퍼 ──────────────────────────────────────────────────────
 

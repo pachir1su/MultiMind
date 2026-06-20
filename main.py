@@ -30,7 +30,7 @@ def main():
 
     # Tkinter 루트 윈도우 생성 및 앱 실행
     root = tk.Tk()
-    root.minsize(800, 650)
+    root.minsize(900, 700)
     MultiMindApp(root)
     root.mainloop()
 
