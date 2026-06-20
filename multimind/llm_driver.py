@@ -72,6 +72,8 @@ LLM_URLS = {
     "claude":  "https://claude.ai/new",
     "chatgpt": "https://chatgpt.com/",
     "gemini":  "https://gemini.google.com/app",
+    "grok":    "https://grok.com/",
+    "perplexity": "https://www.perplexity.ai/",
 }
 
 # ── CSS 셀렉터 (앞에서부터 순서대로 시도) ────────────────────────────────────
@@ -91,6 +93,20 @@ _INPUT = {
         'rich-textarea div[contenteditable="true"]',
         'div[contenteditable="true"][aria-label*="rompt"]',
         'div[contenteditable="true"][aria-label*="essage"]',
+        'div[contenteditable="true"]',
+    ],
+    "grok": [
+        'textarea[aria-label]',
+        'textarea[placeholder]',
+        'textarea',
+        'div[contenteditable="true"][role="textbox"]',
+        'div[contenteditable="true"]',
+    ],
+    "perplexity": [
+        'textarea[placeholder]',
+        'textarea[autofocus]',
+        'textarea',
+        'div[contenteditable="true"][role="textbox"]',
         'div[contenteditable="true"]',
     ],
 }
@@ -117,6 +133,21 @@ _SEND = {
         '.trailing-icon-button',
         '.input-area-container button[aria-label]',
     ],
+    "grok": [
+        'button[aria-label="Send"]',
+        'button[aria-label="Send message"]',
+        'button[aria-label="전송"]',
+        'button[type="submit"]',
+        'button[data-testid="send-button"]',
+    ],
+    "perplexity": [
+        'button[aria-label="Submit"]',
+        'button[aria-label="Send"]',
+        'button[aria-label="전송"]',
+        'button[type="submit"]',
+        'button[data-testid="submit-button"]',
+        'button[data-testid="send-button"]',
+    ],
 }
 
 _RESPONSE = {
@@ -142,6 +173,22 @@ _RESPONSE = {
         ".response-content",
         ".model-response-text",
     ],
+    "grok": [
+        'div[class*="message-bubble"]',
+        'div[class*="response"]',
+        'div[class*="markdown"]',
+        'div[class*="prose"]',
+        '.message-text',
+        'div[data-testid*="message"]',
+    ],
+    "perplexity": [
+        'div[class*="prose"]',
+        'div[class*="markdown"]',
+        'div[class*="answer"]',
+        '.prose',
+        'div[dir="auto"]',
+        'div[data-testid*="answer"]',
+    ],
 }
 
 # 로그인 페이지 URL 키워드
@@ -152,6 +199,8 @@ _LLM_DOMAINS = {
     "claude": ["claude.ai"],
     "chatgpt": ["chatgpt.com", "chat.openai.com"],
     "gemini": ["gemini.google.com", "accounts.google.com"],
+    "grok": ["grok.com", "x.com"],
+    "perplexity": ["perplexity.ai"],
 }
 
 # ── 타임아웃 상수 ─────────────────────────────────────────────────────────────
@@ -742,17 +791,26 @@ class LLMDriver:
         if inputEl is None:
             raise NoSuchElementException("입력창 미발견")
 
-        # 텍스트 입력: 기존 내용 전체 선택 → 삭제 → 클립보드 붙여넣기
-        inputEl.click()
-        time.sleep(0.3)
-        inputEl.send_keys(_MOD_KEY, "a")
-        time.sleep(0.1)
-        inputEl.send_keys(Keys.DELETE)
-        time.sleep(0.1)
-
-        pyperclip.copy(prompt)
-        inputEl.send_keys(_MOD_KEY, "v")
-        time.sleep(0.5)
+        # textarea 요소는 send_keys로 직접 입력 (Grok, Perplexity 등)
+        tagName = inputEl.tag_name.lower()
+        if tagName == "textarea":
+            inputEl.click()
+            time.sleep(0.3)
+            inputEl.clear()
+            time.sleep(0.1)
+            inputEl.send_keys(prompt)
+            time.sleep(0.5)
+        else:
+            # contenteditable 요소: 전체 선택 → 삭제 → 클립보드 붙여넣기
+            inputEl.click()
+            time.sleep(0.3)
+            inputEl.send_keys(_MOD_KEY, "a")
+            time.sleep(0.1)
+            inputEl.send_keys(Keys.DELETE)
+            time.sleep(0.1)
+            pyperclip.copy(prompt)
+            inputEl.send_keys(_MOD_KEY, "v")
+            time.sleep(0.5)
 
         # Gemini: CDP Enter 키로 전송 (버튼 클릭이 안정적이지 않음)
         if llmName == "gemini":
@@ -762,7 +820,7 @@ class LLMDriver:
                 inputEl.send_keys(Keys.RETURN)
             return
 
-        # Claude/ChatGPT: 전송 버튼 클릭
+        # 전송 버튼 클릭
         sendEl = self._findAny(_SEND[llmName], 10)
         if sendEl is None:
             sendEl = self.driver.execute_script(_JS_FIND_SEND)
