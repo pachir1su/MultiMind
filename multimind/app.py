@@ -172,10 +172,6 @@ class MultiMindApp:
             titleRow, text="Head LLM",
             font=(self._ff, 11, "bold"), fg=C["text"], bg=C["surface"],
         ).pack(side="left")
-        tk.Label(
-            titleRow, text="프롬프트 정제 + 결과 종합",
-            font=(self._ff, 9), fg=C["text3"], bg=C["surface"],
-        ).pack(side="left", padx=(8, 0))
 
         tabRow = tk.Frame(card, bg=C["surface"])
         tabRow.pack(fill="x")
