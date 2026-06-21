@@ -1,5 +1,5 @@
 # Tkinter GUI 모듈 — MultiMind 메인 인터페이스
-# 다크 테마 기반 모던 UI, 이벤트 큐 비동기 업데이트, LLM 브랜드 컬러 pill 선택
+# 라이트 테마, 밑줄 탭 LLM 선택, macOS 네이티브 스타일
 
 import platform
 import queue
@@ -23,68 +23,71 @@ SUPPORTED_LLMS = [
 # 이벤트 큐 폴링 주기 (밀리초)
 POLL_INTERVAL_MS = 100
 
-# ── 다크 테마 컬러 팔레트 ────────────────────────────────────────────────────
+# ── 라이트 테마 컬러 팔레트 (쿨 그레이) ──────────────────────────────────────
 
-COLORS = {
-    "bg":          "#0f1117",
-    "surface":     "#1a1b2e",
-    "surface2":    "#252640",
-    "inputBg":     "#141525",
-    "border":      "#2d2e4a",
-    "borderFocus": "#6c5ce7",
-    "text":        "#e8e8f0",
-    "text2":       "#9090a8",
-    "text3":       "#5a5a70",
-    "accent":      "#6c5ce7",
-    "accentHover": "#8b7cf7",
-    "success":     "#00b894",
-    "error":       "#ff6b6b",
-    "warning":     "#feca57",
-    "info":        "#54a0ff",
-    "runBg":       "#6c5ce7",
-    "runHover":    "#8b7cf7",
-    "stopBg":      "#ff6b6b",
-    "stopHover":   "#ff8787",
-    "statusBar":   "#0a0b12",
-    "logBg":       "#0d0e18",
-    "pillBg":      "#1e1f35",
+C = {
+    "bg":           "#F5F6FA",
+    "surface":      "#FFFFFF",
+    "inputBg":      "#FFFFFF",
+    "border":       "#E2E4EA",
+    "borderFocus":  "#007AFF",
+    "text":         "#1D1D1F",
+    "text2":        "#6E7179",
+    "text3":        "#A0A3AB",
+    "accent":       "#007AFF",
+    "success":      "#34C759",
+    "error":        "#FF3B30",
+    "warning":      "#FF9500",
+    "info":         "#007AFF",
+    "btnPrimary":   "#007AFF",
+    "btnPrimaryH":  "#0062CC",
+    "btnSecondary": "#E8E9ED",
+    "btnSecondaryH":"#D5D6DA",
+    "btnDanger":    "#FF3B30",
+    "btnDangerH":   "#D63028",
+    "statusBar":    "#ECEDF1",
+    "logBg":        "#F8F9FC",
+    "logBorder":    "#E2E4EA",
+    "progressTrack":"#E2E4EA",
+    "disabledBg":   "#F0F1F4",
+    "disabledText": "#C5C7CD",
 }
 
-# LLM별 브랜드 색상
+# LLM별 브랜드 색상 (밑줄 탭 컬러)
 LLM_COLORS = {
-    "claude":     "#d97706",
-    "chatgpt":    "#10a37f",
-    "gemini":     "#4285f4",
-    "grok":       "#8b8b9a",
-    "perplexity": "#20808d",
+    "claude":     "#D97706",
+    "chatgpt":    "#10A37F",
+    "gemini":     "#4285F4",
+    "grok":       "#6B7280",
+    "perplexity": "#20808D",
 }
 
 # 프롬프트 플레이스홀더
 _PLACEHOLDER = "여기에 프롬프트를 입력하세요..."
 
 
-def _detectFontFamily() -> str:
-    """OS별 최적 한글 폰트 반환"""
-    osName = platform.system()
-    if osName == "Windows":
+def _fontFamily() -> str:
+    """OS별 시스템 폰트"""
+    s = platform.system()
+    if s == "Windows":
         return "맑은 고딕"
-    elif osName == "Darwin":
+    if s == "Darwin":
         return "Apple SD Gothic Neo"
     return "Noto Sans CJK KR"
 
 
-def _detectMonoFamily() -> str:
-    """OS별 고정폭 폰트 반환"""
-    osName = platform.system()
-    if osName == "Windows":
+def _monoFamily() -> str:
+    """OS별 고정폭 폰트"""
+    s = platform.system()
+    if s == "Windows":
         return "Consolas"
-    elif osName == "Darwin":
+    if s == "Darwin":
         return "Menlo"
     return "Monospace"
 
 
 class MultiMindApp:
-    """MultiMind 메인 GUI 애플리케이션 (다크 테마)"""
+    """MultiMind 메인 GUI (라이트 테마, macOS 네이티브 스타일)"""
 
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -93,12 +96,8 @@ class MultiMindApp:
         self.eventQueue: queue.Queue = queue.Queue()
         self._polling = False
         self._stopEvent = threading.Event()
-
-        # OS별 폰트
-        self._fontFamily = _detectFontFamily()
-        self._monoFamily = _detectMonoFamily()
-
-        # 플레이스홀더 상태
+        self._ff = _fontFamily()
+        self._mf = _monoFamily()
         self._hasPlaceholder = True
 
         self._initVars()
@@ -107,720 +106,582 @@ class MultiMindApp:
         self._onHeadChanged()
         self._bindShortcuts()
 
-        # 저장된 창 크기/위치 복원
         geometry = self.config.get("window_geometry", "1000x750+100+100")
         self.root.geometry(geometry)
         self.root.protocol("WM_DELETE_WINDOW", self._onClose)
 
-    # ── 변수 초기화 ────────────────────────────────────────────────────────────
+    # ── 초기화 ─────────────────────────────────────────────────────────────────
 
     def _initVars(self):
-        """Head/Worker LLM 선택 변수 초기화"""
         self.headVar = tk.StringVar(value="claude")
         self.workerVars = {
             key: tk.BooleanVar(value=False) for _, key in SUPPORTED_LLMS
         }
 
-    # ── 키보드 단축키 ──────────────────────────────────────────────────────────
-
     def _bindShortcuts(self):
-        """키보드 단축키 바인딩"""
         self.root.bind("<Control-Return>", lambda e: self._onRunClicked())
         self.root.bind("<Control-q>", lambda e: self._onClose())
 
-    # ── 전체 UI 구성 ──────────────────────────────────────────────────────────
+    # ── UI 구성 ────────────────────────────────────────────────────────────────
 
     def _buildUi(self):
-        """전체 레이아웃 구축"""
-        self.root.title("MultiMind — 멀티 LLM 오케스트레이터")
-        self.root.configure(bg=COLORS["bg"])
+        self.root.title("MultiMind")
+        self.root.configure(bg=C["bg"])
 
-        # 메인 컨테이너
-        mainFrame = tk.Frame(self.root, bg=COLORS["bg"], padx=16, pady=12)
-        mainFrame.grid(row=0, column=0, sticky="nsew")
+        main = tk.Frame(self.root, bg=C["bg"], padx=20, pady=16)
+        main.grid(row=0, column=0, sticky="nsew")
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
-        mainFrame.columnconfigure(0, weight=1)
+        main.columnconfigure(0, weight=1)
 
-        # 각 섹션 빌드
-        self._buildHeader(mainFrame)
-        self._buildHeadSection(mainFrame)
-        self._buildWorkerSection(mainFrame)
-        self._buildPromptSection(mainFrame)
-        self._buildButtonSection(mainFrame)
-        self._buildProgressSection(mainFrame)
-        self._buildOutputSection(mainFrame)
-        self._buildLogSection(mainFrame)
+        self._buildHeader(main)
+        self._buildHeadSection(main)
+        self._buildWorkerSection(main)
+        self._buildPromptSection(main)
+        self._buildButtonSection(main)
+        self._buildProgressSection(main)
+        self._buildOutputSection(main)
+        self._buildLogSection(main)
         self._buildStatusBar()
 
     # ── 헤더 ───────────────────────────────────────────────────────────────────
 
     def _buildHeader(self, parent):
-        """앱 타이틀 + 버전 배지 + 서브타이틀"""
-        headerFrame = tk.Frame(parent, bg=COLORS["bg"])
-        headerFrame.grid(row=0, column=0, sticky="ew", pady=(0, 16))
-        headerFrame.columnconfigure(1, weight=1)
+        frame = tk.Frame(parent, bg=C["bg"])
+        frame.grid(row=0, column=0, sticky="ew", pady=(0, 20))
 
-        # 타이틀
         tk.Label(
-            headerFrame, text="MultiMind",
-            font=(self._fontFamily, 22, "bold"),
-            fg=COLORS["text"], bg=COLORS["bg"],
-        ).grid(row=0, column=0, sticky="w")
-
-        # 버전 배지
-        versionBadge = tk.Frame(
-            headerFrame, bg=COLORS["accent"], padx=8, pady=2
-        )
-        versionBadge.grid(row=0, column=2, sticky="e", padx=(8, 0))
-        tk.Label(
-            versionBadge, text="v0.5.0",
-            font=(self._fontFamily, 8, "bold"),
-            fg="#ffffff", bg=COLORS["accent"],
-        ).pack()
-
-        # 서브타이틀
-        tk.Label(
-            headerFrame,
-            text="멀티 LLM 오케스트레이터  ·  여러 AI의 지혜를 하나로",
-            font=(self._fontFamily, 10),
-            fg=COLORS["text3"], bg=COLORS["bg"],
-        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 0))
+            frame, text="MultiMind",
+            font=(self._ff, 20, "bold"),
+            fg=C["text"], bg=C["bg"],
+        ).pack(side="left")
 
         # 구분선
-        tk.Frame(headerFrame, bg=COLORS["border"], height=1).grid(
-            row=2, column=0, columnspan=3, sticky="ew", pady=(12, 0)
+        tk.Frame(parent, bg=C["border"], height=1).grid(
+            row=0, column=0, sticky="sew"
         )
 
-    # ── Head LLM 선택 ─────────────────────────────────────────────────────────
+    # ── Head LLM ───────────────────────────────────────────────────────────────
 
     def _buildHeadSection(self, parent):
-        """Head LLM 선택 — 브랜드 컬러 pill 버튼"""
-        card = self._createCard(parent, row=1)
+        card = self._card(parent, row=1)
 
-        # 제목 행
-        titleRow = tk.Frame(card, bg=COLORS["surface"])
-        titleRow.pack(fill="x", pady=(0, 10))
+        titleRow = tk.Frame(card, bg=C["surface"])
+        titleRow.pack(fill="x", pady=(0, 12))
         tk.Label(
             titleRow, text="Head LLM",
-            font=(self._fontFamily, 11, "bold"),
-            fg=COLORS["text"], bg=COLORS["surface"],
+            font=(self._ff, 11, "bold"), fg=C["text"], bg=C["surface"],
         ).pack(side="left")
         tk.Label(
             titleRow, text="프롬프트 정제 + 결과 종합",
-            font=(self._fontFamily, 9),
-            fg=COLORS["text3"], bg=COLORS["surface"],
+            font=(self._ff, 9), fg=C["text3"], bg=C["surface"],
         ).pack(side="left", padx=(8, 0))
 
-        # pill 버튼 행
-        pillFrame = tk.Frame(card, bg=COLORS["surface"])
-        pillFrame.pack(fill="x")
-        self._headPills = {}
+        tabRow = tk.Frame(card, bg=C["surface"])
+        tabRow.pack(fill="x")
+        self._headTabs = {}
         for _, (label, key) in enumerate(SUPPORTED_LLMS):
-            pill = self._createPill(
-                pillFrame, label, key,
+            tab = self._tab(
+                tabRow, label, key,
                 onClick=lambda k=key: self._selectHead(k),
             )
-            pill.pack(side="left", padx=(0, 8), pady=2)
-            self._headPills[key] = pill
+            tab.pack(side="left", padx=(0, 24))
+            self._headTabs[key] = tab
 
-    # ── Worker LLM 선택 ───────────────────────────────────────────────────────
+    # ── Worker LLM ─────────────────────────────────────────────────────────────
 
     def _buildWorkerSection(self, parent):
-        """Worker LLM 선택 — 토글 pill 버튼"""
-        card = self._createCard(parent, row=2)
+        card = self._card(parent, row=2)
 
-        titleRow = tk.Frame(card, bg=COLORS["surface"])
-        titleRow.pack(fill="x", pady=(0, 10))
+        titleRow = tk.Frame(card, bg=C["surface"])
+        titleRow.pack(fill="x", pady=(0, 12))
         tk.Label(
             titleRow, text="Worker LLM",
-            font=(self._fontFamily, 11, "bold"),
-            fg=COLORS["text"], bg=COLORS["surface"],
+            font=(self._ff, 11, "bold"), fg=C["text"], bg=C["surface"],
         ).pack(side="left")
-        tk.Label(
-            titleRow, text="Head 선택 시 자동 비활성화",
-            font=(self._fontFamily, 9),
-            fg=COLORS["text3"], bg=COLORS["surface"],
-        ).pack(side="left", padx=(8, 0))
 
-        # 선택 카운터 라벨
         self._workerCountLabel = tk.Label(
             titleRow, text="0개 선택",
-            font=(self._fontFamily, 9, "bold"),
-            fg=COLORS["accent"], bg=COLORS["surface"],
+            font=(self._ff, 9, "bold"), fg=C["accent"], bg=C["surface"],
         )
         self._workerCountLabel.pack(side="right")
 
-        pillFrame = tk.Frame(card, bg=COLORS["surface"])
-        pillFrame.pack(fill="x")
-        self._workerPills = {}
+        tabRow = tk.Frame(card, bg=C["surface"])
+        tabRow.pack(fill="x")
+        self._workerTabs = {}
         for _, (label, key) in enumerate(SUPPORTED_LLMS):
-            pill = self._createPill(
-                pillFrame, label, key,
+            tab = self._tab(
+                tabRow, label, key,
                 onClick=lambda k=key: self._toggleWorker(k),
             )
-            pill.pack(side="left", padx=(0, 8), pady=2)
-            self._workerPills[key] = pill
+            tab.pack(side="left", padx=(0, 24))
+            self._workerTabs[key] = tab
 
-    # ── 프롬프트 입력 ──────────────────────────────────────────────────────────
+    # ── 프롬프트 ───────────────────────────────────────────────────────────────
 
     def _buildPromptSection(self, parent):
-        """프롬프트 입력 텍스트 영역 + 글자 수 + 단축키 힌트"""
-        card = self._createCard(parent, row=3)
+        card = self._card(parent, row=3)
 
-        # 제목 행
-        titleRow = tk.Frame(card, bg=COLORS["surface"])
+        titleRow = tk.Frame(card, bg=C["surface"])
         titleRow.pack(fill="x", pady=(0, 8))
         titleRow.columnconfigure(0, weight=1)
         tk.Label(
             titleRow, text="프롬프트",
-            font=(self._fontFamily, 11, "bold"),
-            fg=COLORS["text"], bg=COLORS["surface"],
+            font=(self._ff, 11, "bold"), fg=C["text"], bg=C["surface"],
         ).grid(row=0, column=0, sticky="w")
 
         self._charCountLabel = tk.Label(
             titleRow, text="0자",
-            font=(self._fontFamily, 9),
-            fg=COLORS["text3"], bg=COLORS["surface"],
+            font=(self._ff, 9), fg=C["text3"], bg=C["surface"],
         )
         self._charCountLabel.grid(row=0, column=1, sticky="e")
 
         tk.Label(
             titleRow, text="Ctrl+Enter 실행",
-            font=(self._fontFamily, 8),
-            fg=COLORS["text3"], bg=COLORS["surface"],
+            font=(self._ff, 8), fg=C["text3"], bg=C["surface"],
         ).grid(row=0, column=2, sticky="e", padx=(8, 0))
 
-        # 입력 필드 래퍼 (1px 테두리 효과)
-        self._promptWrapper = tk.Frame(
-            card, bg=COLORS["border"], padx=1, pady=1
-        )
+        # 입력 필드 (1px 테두리 래퍼)
+        self._promptWrapper = tk.Frame(card, bg=C["border"], padx=1, pady=1)
         self._promptWrapper.pack(fill="x")
 
         self.promptText = tk.Text(
             self._promptWrapper, height=5, wrap="word",
-            font=(self._fontFamily, 11),
-            bg=COLORS["inputBg"], fg=COLORS["text3"],
-            insertbackground=COLORS["accent"],
-            selectbackground=COLORS["accent"],
-            selectforeground="#ffffff",
+            font=(self._ff, 11),
+            bg=C["inputBg"], fg=C["text3"],
+            insertbackground=C["text"],
+            selectbackground=C["accent"], selectforeground="#FFFFFF",
             relief="flat", bd=0, padx=12, pady=10,
         )
         self.promptText.pack(fill="x")
 
-        # 플레이스홀더 삽입
         self.promptText.insert("1.0", _PLACEHOLDER)
         self._hasPlaceholder = True
-
-        # 포커스 이벤트 → 테두리 컬러 + 플레이스홀더 제어
         self.promptText.bind("<FocusIn>", self._onPromptFocusIn)
         self.promptText.bind("<FocusOut>", self._onPromptFocusOut)
         self.promptText.bind("<KeyRelease>", self._updateCharCount)
 
-    # ── 액션 버튼 ──────────────────────────────────────────────────────────────
+    # ── 버튼 ───────────────────────────────────────────────────────────────────
 
     def _buildButtonSection(self, parent):
-        """실행/중단/지우기/복사/종료 버튼"""
-        frame = tk.Frame(parent, bg=COLORS["bg"])
-        frame.grid(row=4, column=0, sticky="ew", pady=(8, 4))
+        frame = tk.Frame(parent, bg=C["bg"])
+        frame.grid(row=4, column=0, sticky="ew", pady=(10, 4))
 
-        # 실행 (primary)
-        self.runButton = self._createButton(
+        # 실행
+        self.runButton = self._btn(
             frame, "▶  실행",
-            bg=COLORS["runBg"], hoverBg=COLORS["runHover"],
-            command=self._onRunClicked, bold=True, padx=20,
+            bg=C["btnPrimary"], hoverBg=C["btnPrimaryH"],
+            fg="#FFFFFF", bold=True, padx=20,
+            command=self._onRunClicked,
         )
         self.runButton.pack(side="left", padx=(0, 8))
 
         # 중단
-        self.stopButton = self._createButton(
+        self.stopButton = self._btn(
             frame, "■  중단",
-            bg=COLORS["stopBg"], hoverBg=COLORS["stopHover"],
-            command=self._onStopClicked, padx=14,
+            bg=C["btnDanger"], hoverBg=C["btnDangerH"],
+            fg="#FFFFFF", padx=14,
+            command=self._onStopClicked,
         )
         self.stopButton.pack(side="left", padx=(0, 8))
-        self._setButtonDisabled(self.stopButton)
+        self._disableBtn(self.stopButton)
 
-        # 보조: 지우기
-        self._createButton(
+        # 지우기
+        self._btn(
             frame, "지우기",
-            bg=COLORS["surface2"], hoverBg=COLORS["border"],
-            command=self._clearPrompt, fg=COLORS["text2"],
+            bg=C["btnSecondary"], hoverBg=C["btnSecondaryH"],
+            fg=C["text2"], command=self._clearPrompt,
         ).pack(side="left", padx=(0, 6))
 
-        # 보조: 결과 복사
-        self._createButton(
+        # 결과 복사
+        self._btn(
             frame, "결과 복사",
-            bg=COLORS["surface2"], hoverBg=COLORS["border"],
-            command=self._copyOutput, fg=COLORS["text2"],
+            bg=C["btnSecondary"], hoverBg=C["btnSecondaryH"],
+            fg=C["text2"], command=self._copyOutput,
         ).pack(side="left", padx=(0, 6))
 
-        # 종료 (우측)
-        self.exitButton = self._createButton(
+        # 종료
+        self.exitButton = self._btn(
             frame, "종료",
-            bg=COLORS["surface2"], hoverBg="#4a2020",
-            command=self._onClose, fg=COLORS["text3"],
+            bg=C["bg"], hoverBg=C["btnSecondary"],
+            fg=C["text3"], command=self._onClose,
         )
         self.exitButton.pack(side="right")
 
     # ── 프로그레스 ─────────────────────────────────────────────────────────────
 
     def _buildProgressSection(self, parent):
-        """Canvas 기반 프로그레스 바 + 단계 라벨"""
-        self.progressFrame = tk.Frame(parent, bg=COLORS["bg"])
+        self.progressFrame = tk.Frame(parent, bg=C["bg"])
         self.progressFrame.grid(row=5, column=0, sticky="ew", pady=(4, 8))
         self.progressFrame.columnconfigure(0, weight=1)
 
-        # 라벨 행
-        labelRow = tk.Frame(self.progressFrame, bg=COLORS["bg"])
+        labelRow = tk.Frame(self.progressFrame, bg=C["bg"])
         labelRow.grid(row=0, column=0, sticky="ew", pady=(0, 4))
         labelRow.columnconfigure(0, weight=1)
 
         self.progressLabel = tk.Label(
             labelRow, text="",
-            font=(self._fontFamily, 9),
-            fg=COLORS["text2"], bg=COLORS["bg"], anchor="w",
+            font=(self._ff, 9), fg=C["text2"], bg=C["bg"], anchor="w",
         )
         self.progressLabel.grid(row=0, column=0, sticky="w")
 
         self._progressPercent = tk.Label(
             labelRow, text="",
-            font=(self._fontFamily, 9, "bold"),
-            fg=COLORS["accent"], bg=COLORS["bg"],
+            font=(self._ff, 9, "bold"), fg=C["accent"], bg=C["bg"],
         )
         self._progressPercent.grid(row=0, column=1, sticky="e")
 
-        # Canvas 프로그레스 바
         self._progressCanvas = tk.Canvas(
-            self.progressFrame, height=6,
-            bg=COLORS["surface2"], highlightthickness=0, bd=0,
+            self.progressFrame, height=4,
+            bg=C["progressTrack"], highlightthickness=0, bd=0,
         )
         self._progressCanvas.grid(row=1, column=0, sticky="ew")
         self._progressValue = 0
         self._progressCanvas.bind("<Configure>", self._drawProgress)
-
-        # 초기 숨김
         self.progressFrame.grid_remove()
 
-    # ── 최종 합성 결과 ─────────────────────────────────────────────────────────
+    # ── 최종 결과 ──────────────────────────────────────────────────────────────
 
     def _buildOutputSection(self, parent):
-        """최종 결과 출력 텍스트 영역"""
-        card = self._createCard(parent, row=6, expand=True, weight=3)
+        card = self._card(parent, row=6, expand=True, weight=3)
 
-        titleRow = tk.Frame(card, bg=COLORS["surface"])
+        titleRow = tk.Frame(card, bg=C["surface"])
         titleRow.pack(fill="x", pady=(0, 8))
         tk.Label(
             titleRow, text="최종 합성 결과",
-            font=(self._fontFamily, 11, "bold"),
-            fg=COLORS["text"], bg=COLORS["surface"],
+            font=(self._ff, 11, "bold"), fg=C["text"], bg=C["surface"],
         ).pack(side="left")
-
         self._outputLenLabel = tk.Label(
             titleRow, text="",
-            font=(self._fontFamily, 9),
-            fg=COLORS["text3"], bg=COLORS["surface"],
+            font=(self._ff, 9), fg=C["text3"], bg=C["surface"],
         )
         self._outputLenLabel.pack(side="right")
 
-        textFrame = tk.Frame(card, bg=COLORS["border"], padx=1, pady=1)
+        textFrame = tk.Frame(card, bg=C["border"], padx=1, pady=1)
         textFrame.pack(fill="both", expand=True)
-
         self.outputText = tk.Text(
             textFrame, wrap="word", state="disabled",
-            font=(self._fontFamily, 11),
-            bg=COLORS["inputBg"], fg=COLORS["text"],
-            insertbackground=COLORS["text"],
-            selectbackground=COLORS["accent"],
-            selectforeground="#ffffff",
+            font=(self._ff, 11),
+            bg=C["inputBg"], fg=C["text"],
+            insertbackground=C["text"],
+            selectbackground=C["accent"], selectforeground="#FFFFFF",
             relief="flat", bd=0, padx=12, pady=10,
         )
-        outputScrollbar = tk.Scrollbar(
-            textFrame, command=self.outputText.yview,
-            bg=COLORS["surface"], troughcolor=COLORS["inputBg"],
-            width=8, relief="flat", bd=0,
-        )
-        outputScrollbar.pack(side="right", fill="y")
+        sb = tk.Scrollbar(textFrame, command=self.outputText.yview)
+        sb.pack(side="right", fill="y")
         self.outputText.pack(side="left", fill="both", expand=True)
-        self.outputText["yscrollcommand"] = outputScrollbar.set
+        self.outputText["yscrollcommand"] = sb.set
 
     # ── 진행 로그 ──────────────────────────────────────────────────────────────
 
     def _buildLogSection(self, parent):
-        """터미널 스타일 로그 출력"""
-        card = self._createCard(parent, row=7, expand=True, weight=1)
+        card = self._card(parent, row=7, expand=True, weight=1)
 
-        titleRow = tk.Frame(card, bg=COLORS["surface"])
+        titleRow = tk.Frame(card, bg=C["surface"])
         titleRow.pack(fill="x", pady=(0, 8))
         tk.Label(
             titleRow, text="진행 로그",
-            font=(self._fontFamily, 11, "bold"),
-            fg=COLORS["text"], bg=COLORS["surface"],
+            font=(self._ff, 11, "bold"), fg=C["text"], bg=C["surface"],
         ).pack(side="left")
 
-        textFrame = tk.Frame(card, bg="#1a1a2e", padx=1, pady=1)
+        textFrame = tk.Frame(card, bg=C["logBorder"], padx=1, pady=1)
         textFrame.pack(fill="both", expand=True)
-
         self.logText = tk.Text(
             textFrame, wrap="word", state="disabled",
-            font=(self._monoFamily, 9),
-            bg=COLORS["logBg"], fg="#8a8aa0",
-            insertbackground="#ffffff",
-            selectbackground=COLORS["accent"],
-            selectforeground="#ffffff",
+            font=(self._mf, 9),
+            bg=C["logBg"], fg=C["text2"],
+            insertbackground=C["text"],
+            selectbackground=C["accent"], selectforeground="#FFFFFF",
             relief="flat", bd=0, padx=12, pady=8,
         )
-        logScrollbar = tk.Scrollbar(
-            textFrame, command=self.logText.yview,
-            bg=COLORS["surface"], troughcolor=COLORS["logBg"],
-            width=8, relief="flat", bd=0,
-        )
-        logScrollbar.pack(side="right", fill="y")
+        sb = tk.Scrollbar(textFrame, command=self.logText.yview)
+        sb.pack(side="right", fill="y")
         self.logText.pack(side="left", fill="both", expand=True)
-        self.logText["yscrollcommand"] = logScrollbar.set
+        self.logText["yscrollcommand"] = sb.set
 
-        # 로그 색상 태그
-        self.logText.tag_config("error", foreground=COLORS["error"])
-        self.logText.tag_config("success", foreground=COLORS["success"])
-        self.logText.tag_config("phase", foreground=COLORS["warning"])
-        self.logText.tag_config("info", foreground=COLORS["info"])
+        self.logText.tag_config("error", foreground=C["error"])
+        self.logText.tag_config("success", foreground="#2D9E46")
+        self.logText.tag_config("phase", foreground=C["warning"])
+        self.logText.tag_config("info", foreground=C["accent"])
 
     # ── 상태 바 ────────────────────────────────────────────────────────────────
 
     def _buildStatusBar(self):
-        """하단 상태 표시줄 (상태 도트 + 텍스트 + 버전)"""
-        statusFrame = tk.Frame(self.root, bg=COLORS["statusBar"], height=28)
-        statusFrame.grid(row=1, column=0, sticky="ew")
-        statusFrame.grid_propagate(False)
+        bar = tk.Frame(self.root, bg=C["statusBar"], height=26)
+        bar.grid(row=1, column=0, sticky="ew")
+        bar.grid_propagate(False)
 
-        # 상태 도트
         self._statusDot = tk.Canvas(
-            statusFrame, width=8, height=8,
-            bg=COLORS["statusBar"], highlightthickness=0,
+            bar, width=8, height=8, bg=C["statusBar"], highlightthickness=0,
         )
-        self._statusDot.pack(side="left", padx=(12, 6), pady=10)
-        self._statusDot.create_oval(
-            0, 0, 8, 8, fill=COLORS["success"], outline=""
-        )
+        self._statusDot.pack(side="left", padx=(12, 6), pady=9)
+        self._statusDot.create_oval(0, 0, 8, 8, fill=C["success"], outline="")
 
         self.statusLabel = tk.Label(
-            statusFrame, text="대기 중",
-            font=(self._fontFamily, 9),
-            fg=COLORS["text2"], bg=COLORS["statusBar"], anchor="w",
+            bar, text="대기 중",
+            font=(self._ff, 9), fg=C["text2"], bg=C["statusBar"], anchor="w",
         )
         self.statusLabel.pack(side="left", fill="x")
 
-        tk.Label(
-            statusFrame, text="MultiMind v0.5.0",
-            font=(self._fontFamily, 8),
-            fg=COLORS["text3"], bg=COLORS["statusBar"],
-        ).pack(side="right", padx=(0, 12))
+    # ── 위젯 헬퍼: 카드 ──────────────────────────────────────────────────────
 
-    # ── 커스텀 위젯 헬퍼 ──────────────────────────────────────────────────────
-
-    def _createCard(self, parent, row, expand=False, weight=0):
-        """1px 테두리 카드 프레임 생성"""
-        outerFrame = tk.Frame(parent, bg=COLORS["border"], padx=1, pady=1)
-        outerFrame.grid(
+    def _card(self, parent, row, expand=False, weight=0):
+        outer = tk.Frame(parent, bg=C["border"], padx=1, pady=1)
+        outer.grid(
             row=row, column=0,
             sticky="nsew" if expand else "ew",
-            pady=(0, 8),
+            pady=(0, 10),
         )
         if expand:
             parent.rowconfigure(row, weight=weight)
+        inner = tk.Frame(outer, bg=C["surface"], padx=16, pady=14)
+        inner.pack(fill="both", expand=True)
+        return inner
 
-        innerFrame = tk.Frame(
-            outerFrame, bg=COLORS["surface"], padx=16, pady=12
-        )
-        innerFrame.pack(fill="both", expand=True)
-        return innerFrame
+    # ── 위젯 헬퍼: 밑줄 탭 ───────────────────────────────────────────────────
 
-    def _createPill(self, parent, label, key, onClick=None):
-        """LLM pill 버튼 — 좌측 브랜드 컬러 인디케이터 + 라벨"""
-        brandColor = LLM_COLORS.get(key, COLORS["accent"])
+    def _tab(self, parent, label, key, onClick=None):
+        """밑줄 스타일 탭 — 선택 시 브랜드 컬러 밑줄 표시"""
+        brandColor = LLM_COLORS.get(key, C["accent"])
 
-        pill = tk.Frame(
-            parent, bg=COLORS["pillBg"], padx=2, pady=2, cursor="hand2"
-        )
-        # 브랜드 컬러 좌측 바
-        indicator = tk.Frame(pill, bg=brandColor, width=3)
-        indicator.pack(side="left", fill="y")
-
-        innerFrame = tk.Frame(pill, bg=COLORS["pillBg"], padx=10, pady=6)
-        innerFrame.pack(side="left", fill="both", expand=True)
+        frame = tk.Frame(parent, bg=C["surface"], cursor="hand2")
 
         textLabel = tk.Label(
-            innerFrame, text=label,
-            font=(self._fontFamily, 10),
-            fg=COLORS["text2"], bg=COLORS["pillBg"], cursor="hand2",
+            frame, text=label,
+            font=(self._ff, 11), fg=C["text2"], bg=C["surface"],
+            cursor="hand2", pady=4,
         )
         textLabel.pack()
 
-        # pill 내부 상태 저장
-        pill._key = key
-        pill._isSelected = False
-        pill._isDisabled = False
-        pill._brandColor = brandColor
-        pill._indicator = indicator
-        pill._innerFrame = innerFrame
-        pill._textLabel = textLabel
+        # 밑줄 바 (미선택 시 투명 = surface 배경과 동일)
+        underline = tk.Frame(frame, height=2, bg=C["surface"])
+        underline.pack(fill="x", pady=(2, 0))
 
-        # 모든 자식 위젯에 클릭 바인딩
-        for widget in (pill, innerFrame, textLabel, indicator):
-            widget.bind(
-                "<Button-1>",
-                lambda e, cb=onClick: cb() if cb else None,
-            )
-        return pill
+        # 내부 상태
+        frame._key = key
+        frame._isSelected = False
+        frame._isDisabled = False
+        frame._brandColor = brandColor
+        frame._textLabel = textLabel
+        frame._underline = underline
 
-    def _createButton(self, parent, text, bg, hoverBg,
-                      command=None, fg="#ffffff", bold=False, padx=14):
-        """호버 효과 버튼"""
-        btn = tk.Button(
+        for w in (frame, textLabel):
+            w.bind("<Button-1>", lambda e, cb=onClick: cb() if cb else None)
+        return frame
+
+    # ── 위젯 헬퍼: 버튼 ──────────────────────────────────────────────────────
+
+    def _btn(self, parent, text, bg, hoverBg,
+             command=None, fg="#FFFFFF", bold=False, padx=14):
+        b = tk.Button(
             parent, text=text, command=command,
-            font=(self._fontFamily, 10, "bold" if bold else "normal"),
+            font=(self._ff, 10, "bold" if bold else "normal"),
             fg=fg, bg=bg,
             activeforeground=fg, activebackground=hoverBg,
-            disabledforeground=COLORS["text3"],
+            disabledforeground=C["disabledText"],
             relief="flat", bd=0, cursor="hand2",
             padx=padx, pady=6,
         )
-        btn._normalBg = bg
-        btn._hoverBg = hoverBg
-        btn._normalFg = fg
-        btn.bind("<Enter>", lambda e, b=btn: self._onButtonEnter(b))
-        btn.bind("<Leave>", lambda e, b=btn: self._onButtonLeave(b))
-        return btn
+        b._normalBg = bg
+        b._hoverBg = hoverBg
+        b._normalFg = fg
+        b.bind("<Enter>", lambda e, btn=b: self._btnEnter(btn))
+        b.bind("<Leave>", lambda e, btn=b: self._btnLeave(btn))
+        return b
 
-    def _onButtonEnter(self, btn):
-        """버튼 호버 진입"""
-        if str(btn["state"]) != "disabled":
-            btn.configure(bg=btn._hoverBg)
+    def _btnEnter(self, b):
+        if str(b["state"]) != "disabled":
+            b.configure(bg=b._hoverBg)
 
-    def _onButtonLeave(self, btn):
-        """버튼 호버 이탈"""
-        if str(btn["state"]) != "disabled":
-            btn.configure(bg=btn._normalBg)
+    def _btnLeave(self, b):
+        if str(b["state"]) != "disabled":
+            b.configure(bg=b._normalBg)
 
-    def _setButtonDisabled(self, btn):
-        """버튼 비활성 외관 설정"""
-        btn.configure(state="disabled", bg=COLORS["text3"], cursor="")
+    def _disableBtn(self, b):
+        b.configure(state="disabled", bg=C["disabledBg"], cursor="")
 
-    def _setButtonEnabled(self, btn):
-        """버튼 활성 외관 복원"""
-        btn.configure(
-            state="normal", bg=btn._normalBg, cursor="hand2"
-        )
+    def _enableBtn(self, b):
+        b.configure(state="normal", bg=b._normalBg, cursor="hand2")
 
-    # ── pill 상태 업데이트 ────────────────────────────────────────────────────
+    # ── 탭 상태 갱신 ──────────────────────────────────────────────────────────
 
     def _selectHead(self, key):
-        """Head LLM 선택"""
         self.headVar.set(key)
-        self._updateHeadPills()
+        self._refreshHeadTabs()
         self._onHeadChanged()
 
     def _toggleWorker(self, key):
-        """Worker LLM 토글"""
+        # Head와 동일한 LLM 선택 시도 → 경고
         if key == self.headVar.get():
+            self._setStatus(
+                "Head LLM은 Worker로 선택할 수 없습니다", "warning"
+            )
             return
-        pill = self._workerPills.get(key)
-        if pill and pill._isDisabled:
+        tab = self._workerTabs.get(key)
+        if tab and tab._isDisabled:
+            self._setStatus(
+                "Head LLM은 Worker로 선택할 수 없습니다", "warning"
+            )
             return
         self.workerVars[key].set(not self.workerVars[key].get())
-        self._updateWorkerPills()
+        self._refreshWorkerTabs()
 
-    def _updateHeadPills(self):
-        """Head pill 시각 상태 갱신"""
-        selectedKey = self.headVar.get()
-        for key, pill in self._headPills.items():
-            selected = key == selectedKey
-            pill._isSelected = selected
+    def _refreshHeadTabs(self):
+        sel = self.headVar.get()
+        for key, tab in self._headTabs.items():
+            selected = key == sel
+            tab._isSelected = selected
             if selected:
-                pill.configure(bg=pill._brandColor)
-                pill._innerFrame.configure(bg=pill._brandColor)
-                pill._textLabel.configure(
-                    fg="#ffffff", bg=pill._brandColor,
-                    font=(self._fontFamily, 10, "bold"),
+                tab._textLabel.configure(
+                    fg=C["text"], font=(self._ff, 11, "bold"),
                 )
-                pill._indicator.configure(bg="#ffffff")
+                tab._underline.configure(bg=tab._brandColor)
             else:
-                pill.configure(bg=COLORS["pillBg"])
-                pill._innerFrame.configure(bg=COLORS["pillBg"])
-                pill._textLabel.configure(
-                    fg=COLORS["text2"], bg=COLORS["pillBg"],
-                    font=(self._fontFamily, 10),
+                tab._textLabel.configure(
+                    fg=C["text2"], font=(self._ff, 11),
                 )
-                pill._indicator.configure(bg=pill._brandColor)
+                tab._underline.configure(bg=C["surface"])
 
-    def _updateWorkerPills(self):
-        """Worker pill 시각 상태 갱신 (선택/비활성/기본)"""
-        selectedHead = self.headVar.get()
+    def _refreshWorkerTabs(self):
+        head = self.headVar.get()
         count = 0
-        for key, pill in self._workerPills.items():
-            disabled = key == selectedHead
+        for key, tab in self._workerTabs.items():
+            disabled = key == head
             selected = self.workerVars[key].get() and not disabled
-            pill._isDisabled = disabled
-            pill._isSelected = selected
+            tab._isDisabled = disabled
+            tab._isSelected = selected
 
             if disabled:
-                # Head와 동일 → 비활성 스타일
-                pill.configure(bg=COLORS["bg"], cursor="")
-                pill._innerFrame.configure(bg=COLORS["bg"])
-                pill._textLabel.configure(
-                    fg=COLORS["text3"], bg=COLORS["bg"],
-                    font=(self._fontFamily, 10), cursor="",
+                tab._textLabel.configure(
+                    fg=C["disabledText"], font=(self._ff, 11),
+                    cursor="arrow",
                 )
-                pill._indicator.configure(bg=COLORS["text3"])
+                tab._underline.configure(bg=C["surface"])
+                tab.configure(cursor="arrow")
             elif selected:
                 count += 1
-                pill.configure(bg=pill._brandColor, cursor="hand2")
-                pill._innerFrame.configure(bg=pill._brandColor)
-                pill._textLabel.configure(
-                    fg="#ffffff", bg=pill._brandColor,
-                    font=(self._fontFamily, 10, "bold"), cursor="hand2",
+                tab._textLabel.configure(
+                    fg=C["text"], font=(self._ff, 11, "bold"),
+                    cursor="hand2",
                 )
-                pill._indicator.configure(bg="#ffffff")
+                tab._underline.configure(bg=tab._brandColor)
+                tab.configure(cursor="hand2")
             else:
-                pill.configure(bg=COLORS["pillBg"], cursor="hand2")
-                pill._innerFrame.configure(bg=COLORS["pillBg"])
-                pill._textLabel.configure(
-                    fg=COLORS["text2"], bg=COLORS["pillBg"],
-                    font=(self._fontFamily, 10), cursor="hand2",
+                tab._textLabel.configure(
+                    fg=C["text2"], font=(self._ff, 11),
+                    cursor="hand2",
                 )
-                pill._indicator.configure(bg=pill._brandColor)
+                tab._underline.configure(bg=C["surface"])
+                tab.configure(cursor="hand2")
 
         self._workerCountLabel.configure(text=f"{count}개 선택")
 
-    # ── 프로그레스 바 렌더링 ──────────────────────────────────────────────────
+    # ── 프로그레스 렌더링 ──────────────────────────────────────────────────────
 
     def _drawProgress(self, event=None):
-        """Canvas 위에 프로그레스 바 그리기"""
-        canvas = self._progressCanvas
-        canvas.delete("all")
-        w = canvas.winfo_width()
-        h = canvas.winfo_height()
-        # 트랙 배경
-        canvas.create_rectangle(0, 0, w, h, fill=COLORS["surface2"], outline="")
-        # 진행 바
+        cv = self._progressCanvas
+        cv.delete("all")
+        w, h = cv.winfo_width(), cv.winfo_height()
+        cv.create_rectangle(0, 0, w, h, fill=C["progressTrack"], outline="")
         if self._progressValue > 0:
-            fillW = int(w * self._progressValue / 100)
-            canvas.create_rectangle(
-                0, 0, fillW, h, fill=COLORS["accent"], outline=""
+            cv.create_rectangle(
+                0, 0, int(w * self._progressValue / 100), h,
+                fill=C["accent"], outline="",
             )
 
-    # ── 저장된 설정 적용 ──────────────────────────────────────────────────────
+    # ── 설정 적용 ──────────────────────────────────────────────────────────────
 
     def _applySavedConfig(self):
-        """config.json → UI 반영"""
-        headValue = self.config.get("head", "claude")
+        headVal = self.config.get("head", "claude")
         workerList = self.config.get("workers", ["chatgpt", "gemini"])
-        self.headVar.set(headValue)
+        self.headVar.set(headVal)
         for key, var in self.workerVars.items():
             var.set(key in workerList)
-        self._updateHeadPills()
-        self._updateWorkerPills()
+        self._refreshHeadTabs()
+        self._refreshWorkerTabs()
 
-    # ── 플레이스홀더 & 포커스 ─────────────────────────────────────────────────
+    # ── 플레이스홀더 ──────────────────────────────────────────────────────────
 
     def _onPromptFocusIn(self, event):
-        """프롬프트 포커스 진입 — 플레이스홀더 제거, 테두리 강조"""
-        self._promptWrapper.configure(bg=COLORS["borderFocus"])
+        self._promptWrapper.configure(bg=C["borderFocus"])
         if self._hasPlaceholder:
             self.promptText.delete("1.0", "end")
-            self.promptText.configure(fg=COLORS["text"])
+            self.promptText.configure(fg=C["text"])
             self._hasPlaceholder = False
 
     def _onPromptFocusOut(self, event):
-        """프롬프트 포커스 이탈 — 빈 입력이면 플레이스홀더 복원"""
-        self._promptWrapper.configure(bg=COLORS["border"])
+        self._promptWrapper.configure(bg=C["border"])
         if not self.promptText.get("1.0", "end").strip():
             self.promptText.insert("1.0", _PLACEHOLDER)
-            self.promptText.configure(fg=COLORS["text3"])
+            self.promptText.configure(fg=C["text3"])
             self._hasPlaceholder = True
 
     def _getPromptText(self) -> str:
-        """플레이스홀더 상태를 고려한 프롬프트 텍스트 반환"""
         if self._hasPlaceholder:
             return ""
         return self.promptText.get("1.0", "end").strip()
 
     def _updateCharCount(self, event=None):
-        """글자 수 라벨 갱신"""
-        text = self._getPromptText()
-        self._charCountLabel.configure(text=f"{len(text)}자")
+        self._charCountLabel.configure(text=f"{len(self._getPromptText())}자")
 
     # ── 이벤트 핸들러 ──────────────────────────────────────────────────────────
 
     def _onHeadChanged(self, *args):
-        """Head 변경 → 동일 Worker 선택 해제 + pill 갱신"""
-        selectedHead = self.headVar.get()
-        if self.workerVars[selectedHead].get():
-            self.workerVars[selectedHead].set(False)
-        self._updateHeadPills()
-        self._updateWorkerPills()
+        sel = self.headVar.get()
+        if self.workerVars[sel].get():
+            self.workerVars[sel].set(False)
+        self._refreshHeadTabs()
+        self._refreshWorkerTabs()
 
     def _onRunClicked(self):
-        """실행 — 입력 검증 → 오케스트레이터 백그라운드 실행"""
-        promptValue = self._getPromptText()
-        if not promptValue:
+        prompt = self._getPromptText()
+        if not prompt:
             messagebox.showwarning("입력 오류", "프롬프트를 입력해주세요.")
             return
 
-        headValue = self.headVar.get()
-        workerList = [
-            key for key, var in self.workerVars.items()
-            if var.get() and key != headValue
+        head = self.headVar.get()
+        workers = [
+            k for k, v in self.workerVars.items()
+            if v.get() and k != head
         ]
-        if not workerList:
+        if not workers:
             messagebox.showwarning(
                 "설정 오류", "Worker LLM을 최소 1개 이상 선택해주세요."
             )
             return
 
-        # 설정 저장
-        self.configManager.save(
-            headValue, workerList, geometry=self.root.geometry()
-        )
-        writeLog(f"실행 시작 | Head={headValue} | Workers={workerList}")
+        self.configManager.save(head, workers, geometry=self.root.geometry())
+        writeLog(f"실행 시작 | Head={head} | Workers={workers}")
 
-        # UI 전환
         self._setRunningState(True)
         self._clearOutput()
         self._clearLog()
 
-        # 오케스트레이터 실행
         self._stopEvent.clear()
         self.eventQueue = queue.Queue()
-        orchestrator = Orchestrator(
-            headValue, workerList, promptValue, self.eventQueue,
+        orch = Orchestrator(
+            head, workers, prompt, self.eventQueue,
             settings=self.config.get("settings", {}),
             stopEvent=self._stopEvent,
         )
-        threading.Thread(target=orchestrator.run, daemon=True).start()
-
+        threading.Thread(target=orch.run, daemon=True).start()
         self._polling = True
         self.root.after(POLL_INTERVAL_MS, self._pollEventQueue)
 
     def _onStopClicked(self):
-        """중단 버튼 클릭"""
         if messagebox.askyesno("실행 중단", "진행 중인 작업을 중단하시겠습니까?"):
             self._stopEvent.set()
-            self._appendLog(
-                "사용자에 의해 실행이 중단되었습니다.", tag="error"
-            )
+            self._appendLog("사용자에 의해 실행이 중단되었습니다.", tag="error")
             self._setStatus("중단됨", "error")
             self._finish()
 
     def _onClose(self):
-        """프로그램 종료 — 실행 중이면 확인 다이얼로그"""
         if self._polling:
             if not messagebox.askyesno(
                 "종료 확인", "작업이 진행 중입니다. 종료하시겠습니까?"
             ):
                 return
             self._stopEvent.set()
-
         self.configManager.save(
             self.headVar.get(),
             [k for k, v in self.workerVars.items() if v.get()],
@@ -829,89 +690,79 @@ class MultiMindApp:
         self.root.destroy()
 
     def _copyOutput(self):
-        """결과 클립보드 복사"""
-        outputValue = self.outputText.get("1.0", "end").strip()
-        if outputValue:
+        val = self.outputText.get("1.0", "end").strip()
+        if val:
             self.root.clipboard_clear()
-            self.root.clipboard_append(outputValue)
+            self.root.clipboard_append(val)
             self._setStatus("결과가 클립보드에 복사되었습니다", "success")
         else:
             self._setStatus("복사할 결과가 없습니다", "warning")
 
     def _clearPrompt(self):
-        """프롬프트 지우기 → 플레이스홀더 복원"""
         self.promptText.delete("1.0", "end")
         self.promptText.insert("1.0", _PLACEHOLDER)
-        self.promptText.configure(fg=COLORS["text3"])
+        self.promptText.configure(fg=C["text3"])
         self._hasPlaceholder = True
         self._updateCharCount()
 
-    # ── 이벤트 큐 처리 ────────────────────────────────────────────────────────
+    # ── 이벤트 큐 ──────────────────────────────────────────────────────────────
 
     def _pollEventQueue(self):
-        """이벤트 큐 폴링 → UI 업데이트"""
         if not self._polling:
             return
         try:
             while True:
-                event = self.eventQueue.get_nowait()
-                self._handleEvent(event)
+                ev = self.eventQueue.get_nowait()
+                self._handleEvent(ev)
         except queue.Empty:
             pass
         self.root.after(POLL_INTERVAL_MS, self._pollEventQueue)
 
-    def _handleEvent(self, event: dict):
-        """이벤트 타입별 UI 분기"""
-        eventType = event.get("type")
-
-        if eventType == "log":
-            self._appendLog(event["message"])
-
-        elif eventType == "phase":
-            phaseText = f"[Phase {event['phase']}] {event['description']}"
-            self._appendLog(phaseText, tag="phase")
-            self._setStatus(event["description"], "info")
-            self._updateProgress(event["phase"], event["description"])
-
-        elif eventType == "worker_done":
-            msg = f"[{event['llm'].upper()}] 응답 수신 완료"
-            self._appendLog(msg, tag="success")
-
-        elif eventType == "worker_error":
-            msg = f"[{event['llm'].upper()}] 오류: {event['error']}"
-            self._appendLog(msg, tag="error")
-
-        elif eventType == "final_result":
-            self._setOutput(event["text"])
+    def _handleEvent(self, ev: dict):
+        t = ev.get("type")
+        if t == "log":
+            self._appendLog(ev["message"])
+        elif t == "phase":
+            self._appendLog(
+                f"[Phase {ev['phase']}] {ev['description']}", tag="phase"
+            )
+            self._setStatus(ev["description"], "info")
+            self._updateProgress(ev["phase"], ev["description"])
+        elif t == "worker_done":
+            self._appendLog(
+                f"[{ev['llm'].upper()}] 응답 수신 완료", tag="success"
+            )
+        elif t == "worker_error":
+            self._appendLog(
+                f"[{ev['llm'].upper()}] 오류: {ev['error']}", tag="error"
+            )
+        elif t == "final_result":
+            self._setOutput(ev["text"])
             self._appendLog("오케스트레이션 완료", tag="success")
             self._setStatus("완료", "success")
             self._updateProgress(4, "완료")
             self._finish()
-
-        elif eventType == "fatal_error":
-            self._appendLog(f"오류: {event['error']}", tag="error")
-            messagebox.showerror("실행 오류", event["error"])
+        elif t == "fatal_error":
+            self._appendLog(f"오류: {ev['error']}", tag="error")
+            messagebox.showerror("실행 오류", ev["error"])
             self._setStatus("오류 발생", "error")
             self._finish()
-
-        elif eventType == "stopped":
+        elif t == "stopped":
             self._appendLog("실행이 중단되었습니다.", tag="error")
             self._setStatus("중단됨", "error")
             self._finish()
 
-    # ── 실행 상태 전환 ────────────────────────────────────────────────────────
+    # ── 상태 전환 ──────────────────────────────────────────────────────────────
 
     def _finish(self):
-        """실행 완료/오류/중단 후 UI 복원"""
         self._polling = False
         self._setRunningState(False)
 
-    def _setRunningState(self, isRunning: bool):
-        """실행 상태에 따라 버튼/프로그레스 전환"""
-        if isRunning:
-            self._setButtonDisabled(self.runButton)
-            self._setButtonEnabled(self.stopButton)
-            self.stopButton.configure(bg=COLORS["stopBg"])
+    def _setRunningState(self, running: bool):
+        if running:
+            self._disableBtn(self.runButton)
+            self._enableBtn(self.stopButton)
+            self.stopButton.configure(bg=C["btnDanger"])
             self.exitButton.configure(state="disabled", cursor="")
             self._progressValue = 0
             self.progressLabel.configure(text="")
@@ -920,58 +771,50 @@ class MultiMindApp:
             self._drawProgress()
             self._setStatus("실행 중...", "info")
         else:
-            self._setButtonEnabled(self.runButton)
-            self.runButton.configure(bg=COLORS["runBg"])
-            self._setButtonDisabled(self.stopButton)
-            self._setButtonEnabled(self.exitButton)
+            self._enableBtn(self.runButton)
+            self.runButton.configure(bg=C["btnPrimary"])
+            self._disableBtn(self.stopButton)
+            self._enableBtn(self.exitButton)
             self.exitButton.configure(bg=self.exitButton._normalBg)
 
-    def _updateProgress(self, phase: int, description: str):
-        """Phase별 프로그레스 갱신"""
-        phaseProgress = {0: 10, 1: 30, 2: 60, 3: 85, 4: 100}
-        value = phaseProgress.get(phase, 0)
-        self._progressValue = value
+    def _updateProgress(self, phase: int, desc: str):
+        mapping = {0: 10, 1: 30, 2: 60, 3: 85, 4: 100}
+        val = mapping.get(phase, 0)
+        self._progressValue = val
         self._drawProgress()
-
-        phaseNames = {
-            0: "브라우저 시작",
-            1: "프롬프트 정제",
-            2: "Worker 응답 생성",
-            3: "결과 종합",
-            4: "완료",
+        names = {
+            0: "브라우저 시작", 1: "프롬프트 정제",
+            2: "Worker 응답 생성", 3: "결과 종합", 4: "완료",
         }
-        phaseName = phaseNames.get(phase, description)
-        self.progressLabel.configure(text=f"Phase {phase}/4 · {phaseName}")
-        self._progressPercent.configure(text=f"{value}%")
+        self.progressLabel.configure(
+            text=f"Phase {phase}/4 · {names.get(phase, desc)}"
+        )
+        self._progressPercent.configure(text=f"{val}%")
 
     def _setStatus(self, text: str, level: str = "info"):
-        """상태 바 텍스트 + 도트 색상 갱신"""
-        dotColorMap = {
-            "info":    COLORS["info"],
-            "success": COLORS["success"],
-            "error":   COLORS["error"],
-            "warning": COLORS["warning"],
+        colors = {
+            "info": C["info"], "success": C["success"],
+            "error": C["error"], "warning": C["warning"],
         }
-        dotColor = dotColorMap.get(level, COLORS["text2"])
         self._statusDot.delete("all")
-        self._statusDot.create_oval(0, 0, 8, 8, fill=dotColor, outline="")
+        self._statusDot.create_oval(
+            0, 0, 8, 8, fill=colors.get(level, C["text2"]), outline=""
+        )
         self.statusLabel.configure(text=text)
 
-    # ── 텍스트 위젯 헬퍼 ──────────────────────────────────────────────────────
+    # ── 텍스트 헬퍼 ──────────────────────────────────────────────────────────
 
-    def _appendLog(self, message: str, tag: str = None):
-        """로그 텍스트에 메시지 추가"""
+    def _appendLog(self, msg: str, tag: str = None):
         self.logText.configure(state="normal")
-        prefix = "› "
+        line = f"› {msg}\n"
         if tag:
-            self.logText.insert("end", prefix + message + "\n", tag)
+            self.logText.insert("end", line, tag)
         else:
-            self.logText.insert("end", prefix + message + "\n")
+            self.logText.insert("end", line)
         self.logText.see("end")
         self.logText.configure(state="disabled")
 
     def _setOutput(self, text: str):
-        """결과 텍스트 설정"""
         self.outputText.configure(state="normal")
         self.outputText.delete("1.0", "end")
         self.outputText.insert("1.0", text)
@@ -979,14 +822,12 @@ class MultiMindApp:
         self._outputLenLabel.configure(text=f"{len(text)}자")
 
     def _clearOutput(self):
-        """결과 텍스트 초기화"""
         self.outputText.configure(state="normal")
         self.outputText.delete("1.0", "end")
         self.outputText.configure(state="disabled")
         self._outputLenLabel.configure(text="")
 
     def _clearLog(self):
-        """로그 텍스트 초기화"""
         self.logText.configure(state="normal")
         self.logText.delete("1.0", "end")
         self.logText.configure(state="disabled")
