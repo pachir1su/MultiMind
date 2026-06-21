@@ -1,11 +1,19 @@
-# Tkinter GUI 모듈 — MultiMind 메인 인터페이스
-# 라이트 테마, 밑줄 탭 LLM 선택, macOS 네이티브 스타일
+# PySide6 GUI 모듈 — MultiMind 메인 인터페이스
+# 라이트 테마, 2컬럼 레이아웃 (사이드바 + 메인 콘텐츠)
 
-import platform
+import html as htmlLib
+import os
 import queue
 import threading
-import tkinter as tk
-from tkinter import messagebox
+import time
+
+from PySide6.QtCore import Qt, QTimer, QSize
+from PySide6.QtGui import QPixmap, QIcon, QAction, QKeySequence
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QLabel, QPushButton, QTextEdit, QComboBox, QCheckBox,
+    QFrame, QScrollArea, QMessageBox, QSizePolicy, QApplication,
+)
 
 from .config import ConfigManager
 from .logger import writeLog
@@ -23,12 +31,37 @@ SUPPORTED_LLMS = [
 # 이벤트 큐 폴링 주기 (밀리초)
 POLL_INTERVAL_MS = 100
 
-# ── 라이트 테마 컬러 팔레트 (쿨 그레이) ──────────────────────────────────────
+# 프롬프트 최대 글자 수
+MAX_PROMPT_LENGTH = 8000
 
+# LLM 아이콘 파일 매핑
+ICON_FILES = {
+    "claude": "claude_icon.jpg",
+    "chatgpt": "ChatGPT_logo.svg.png",
+    "gemini": "Google_Gemini_icon_2025.svg.png",
+    "grok": "grok_icon.png",
+    "perplexity": "perplexity_icon.png",
+}
+
+# 아이콘 디렉토리 경로
+ICON_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "assets", "icon",
+)
+
+# LLM별 브랜드 색상
+LLM_COLORS = {
+    "claude": "#D97706",
+    "chatgpt": "#10A37F",
+    "gemini": "#4285F4",
+    "grok": "#6B7280",
+    "perplexity": "#20808D",
+}
+
+# ── 라이트 테마 컬러 팔레트 (쿨 그레이) ──────────────────────────────────────
 C = {
     "bg":           "#F5F6FA",
     "surface":      "#FFFFFF",
-    "inputBg":      "#FFFFFF",
     "border":       "#E2E4EA",
     "borderFocus":  "#007AFF",
     "text":         "#1D1D1F",
@@ -38,621 +71,528 @@ C = {
     "success":      "#34C759",
     "error":        "#FF3B30",
     "warning":      "#FF9500",
-    "info":         "#007AFF",
-    "btnPrimary":   "#007AFF",
-    "btnPrimaryH":  "#0062CC",
-    "btnSecondary": "#E8E9ED",
-    "btnSecondaryH":"#D5D6DA",
-    "btnDanger":    "#FF3B30",
-    "btnDangerH":   "#D63028",
-    "statusBar":    "#ECEDF1",
-    "logBg":        "#F8F9FC",
-    "logBorder":    "#E2E4EA",
-    "progressTrack":"#E2E4EA",
-    "disabledBg":   "#F0F1F4",
-    "disabledText": "#C5C7CD",
 }
 
-# LLM별 브랜드 색상 (밑줄 탭 컬러)
-LLM_COLORS = {
-    "claude":     "#D97706",
-    "chatgpt":    "#10A37F",
-    "gemini":     "#4285F4",
-    "grok":       "#6B7280",
-    "perplexity": "#20808D",
-}
 
-# 프롬프트 플레이스홀더
-_PLACEHOLDER = "여기에 프롬프트를 입력하세요..."
+def _loadIcon(key: str, size: int = 20) -> QPixmap:
+    """LLM 아이콘 파일 로드 및 크기 조정"""
+    path = os.path.join(ICON_DIR, ICON_FILES.get(key, ""))
+    if os.path.exists(path):
+        return QPixmap(path).scaled(
+            size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation,
+        )
+    return QPixmap()
 
 
-def _fontFamily() -> str:
-    """OS별 시스템 폰트"""
-    s = platform.system()
-    if s == "Windows":
-        return "맑은 고딕"
-    if s == "Darwin":
-        return "Apple SD Gothic Neo"
-    return "Noto Sans CJK KR"
+# ══════════════════════════════════════════════════════════════════════════════
 
 
-def _monoFamily() -> str:
-    """OS별 고정폭 폰트"""
-    s = platform.system()
-    if s == "Windows":
-        return "Consolas"
-    if s == "Darwin":
-        return "Menlo"
-    return "Monospace"
+class MultiMindApp(QMainWindow):
+    """MultiMind 메인 GUI (PySide6, 라이트 테마, 2컬럼 레이아웃)"""
 
+    def __init__(self):
+        super().__init__()
 
-class MultiMindApp:
-    """MultiMind 메인 GUI (라이트 테마, macOS 네이티브 스타일)"""
-
-    def __init__(self, root: tk.Tk):
-        self.root = root
+        # 설정 및 상태 초기화
         self.configManager = ConfigManager()
         self.config = self.configManager.load()
         self.eventQueue: queue.Queue = queue.Queue()
         self._polling = False
         self._stopEvent = threading.Event()
-        self._ff = _fontFamily()
-        self._mf = _monoFamily()
-        self._hasPlaceholder = True
+        self._workerCount = 0
+        self._completedWorkers = 0
+        self._startTime = None
+        self._cardViewMode = True
+        self._responseCards: dict = {}
+        self._workerCheckboxes: dict = {}
+        self._metricLabels: dict = {}
 
-        self._initVars()
+        # UI 구성
+        self._initWindow()
         self._buildUi()
+        self._applyStyles()
         self._applySavedConfig()
-        self._onHeadChanged()
+        self._updateWorkerStates()
+        self._setupTimers()
         self._bindShortcuts()
 
-        geometry = self.config.get("window_geometry", "1000x750+100+100")
-        self.root.geometry(geometry)
-        self.root.protocol("WM_DELETE_WINDOW", self._onClose)
+    # ── 윈도우 초기화 ─────────────────────────────────────────────────────────
 
-    # ── 초기화 ─────────────────────────────────────────────────────────────────
+    def _initWindow(self):
+        """윈도우 타이틀, 최소 크기, 저장된 geometry 복원"""
+        self.setWindowTitle("MultiMind")
+        self.setMinimumSize(960, 720)
+        geo = self.config.get("window_geometry", "1000x750+100+100")
+        try:
+            parts = geo.replace("+", "x").split("x")
+            self.setGeometry(
+                int(parts[2]), int(parts[3]), int(parts[0]), int(parts[1]),
+            )
+        except (ValueError, IndexError):
+            self.resize(1000, 750)
 
-    def _initVars(self):
-        self.headVar = tk.StringVar(value="claude")
-        self.workerVars = {
-            key: tk.BooleanVar(value=False) for _, key in SUPPORTED_LLMS
-        }
-
-    def _bindShortcuts(self):
-        self.root.bind("<Control-Return>", lambda e: self._onRunClicked())
-        self.root.bind("<Control-q>", lambda e: self._onClose())
-
-    # ── UI 구성 ────────────────────────────────────────────────────────────────
+    # ── 메인 레이아웃 ─────────────────────────────────────────────────────────
 
     def _buildUi(self):
-        self.root.title("MultiMind")
-        self.root.configure(bg=C["bg"])
+        """2컬럼 레이아웃 — 사이드바 + 메인 콘텐츠"""
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QHBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._buildSidebar())
+        layout.addWidget(self._buildContent(), stretch=1)
 
-        main = tk.Frame(self.root, bg=C["bg"], padx=20, pady=16)
-        main.grid(row=0, column=0, sticky="nsew")
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
-        main.columnconfigure(0, weight=1)
+    def _bindShortcuts(self):
+        """키보드 단축키 바인딩"""
+        runAct = QAction(self)
+        runAct.setShortcut(QKeySequence("Ctrl+Return"))
+        runAct.triggered.connect(self._onRunClicked)
+        self.addAction(runAct)
 
-        self._buildHeader(main)
-        self._buildHeadSection(main)
-        self._buildWorkerSection(main)
-        self._buildPromptSection(main)
-        self._buildButtonSection(main)
-        self._buildProgressSection(main)
-        self._buildOutputSection(main)
-        self._buildLogSection(main)
-        self._buildStatusBar()
+        closeAct = QAction(self)
+        closeAct.setShortcut(QKeySequence("Ctrl+Q"))
+        closeAct.triggered.connect(self.close)
+        self.addAction(closeAct)
 
-    # ── 헤더 ───────────────────────────────────────────────────────────────────
+    # ── 사이드바 ──────────────────────────────────────────────────────────────
 
-    def _buildHeader(self, parent):
-        frame = tk.Frame(parent, bg=C["bg"])
-        frame.grid(row=0, column=0, sticky="ew", pady=(0, 20))
+    def _buildSidebar(self):
+        """좌측 사이드바 — AI 설정, Head/Worker 선택, 실행 버튼"""
+        sidebar = QWidget()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(280)
+        lay = QVBoxLayout(sidebar)
+        lay.setContentsMargins(20, 24, 20, 20)
+        lay.setSpacing(12)
 
-        tk.Label(
-            frame, text="MultiMind",
-            font=(self._ff, 20, "bold"),
-            fg=C["text"], bg=C["bg"],
-        ).pack(side="left")
+        # AI 설정 헤더
+        header = QLabel("AI 설정")
+        header.setObjectName("sidebarHeader")
+        lay.addWidget(header)
+
+        # Head LLM 드롭다운
+        lay.addWidget(self._sectionLabel("Head LLM"))
+        self.headCombo = QComboBox()
+        self.headCombo.setObjectName("headCombo")
+        self.headCombo.setIconSize(QSize(20, 20))
+        for displayName, key in SUPPORTED_LLMS:
+            px = _loadIcon(key)
+            icon = QIcon(px) if not px.isNull() else QIcon()
+            self.headCombo.addItem(icon, displayName, key)
+        self.headCombo.currentIndexChanged.connect(self._onHeadChanged)
+        lay.addWidget(self.headCombo)
 
         # 구분선
-        tk.Frame(parent, bg=C["border"], height=1).grid(
-            row=0, column=0, sticky="sew"
-        )
+        lay.addWidget(self._divider())
 
-    # ── Head LLM ───────────────────────────────────────────────────────────────
+        # Worker LLM 체크박스
+        lay.addWidget(self._sectionLabel("Worker LLM"))
+        for displayName, key in SUPPORTED_LLMS:
+            row = QWidget()
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(0, 2, 0, 2)
+            rl.setSpacing(8)
 
-    def _buildHeadSection(self, parent):
-        card = self._card(parent, row=1)
+            # LLM 아이콘
+            iconLbl = QLabel()
+            px = _loadIcon(key, 18)
+            if not px.isNull():
+                iconLbl.setPixmap(px)
+            iconLbl.setFixedSize(18, 18)
+            rl.addWidget(iconLbl)
 
-        titleRow = tk.Frame(card, bg=C["surface"])
-        titleRow.pack(fill="x", pady=(0, 12))
-        tk.Label(
-            titleRow, text="Head LLM",
-            font=(self._ff, 11, "bold"), fg=C["text"], bg=C["surface"],
-        ).pack(side="left")
-
-        tabRow = tk.Frame(card, bg=C["surface"])
-        tabRow.pack(fill="x")
-        self._headTabs = {}
-        for _, (label, key) in enumerate(SUPPORTED_LLMS):
-            tab = self._tab(
-                tabRow, label, key,
-                onClick=lambda k=key: self._selectHead(k),
+            # 체크박스
+            cb = QCheckBox(displayName)
+            cb.stateChanged.connect(
+                lambda _st, k=key: self._onWorkerToggled(k),
             )
-            tab.pack(side="left", padx=(0, 24))
-            self._headTabs[key] = tab
+            rl.addWidget(cb)
+            rl.addStretch()
 
-    # ── Worker LLM ─────────────────────────────────────────────────────────────
+            # disabled 시 힌트 라벨
+            hintLbl = QLabel()
+            hintLbl.setObjectName("disabledHint")
+            hintLbl.setVisible(False)
+            rl.addWidget(hintLbl)
 
-    def _buildWorkerSection(self, parent):
-        card = self._card(parent, row=2)
+            lay.addWidget(row)
+            self._workerCheckboxes[key] = {"checkbox": cb, "hint": hintLbl}
 
-        titleRow = tk.Frame(card, bg=C["surface"])
-        titleRow.pack(fill="x", pady=(0, 12))
-        tk.Label(
-            titleRow, text="Worker LLM",
-            font=(self._ff, 11, "bold"), fg=C["text"], bg=C["surface"],
-        ).pack(side="left")
+        # 경고 메시지
+        warn = QLabel("※ Head LLM은 Worker로 선택할 수 없습니다.")
+        warn.setObjectName("warningLabel")
+        warn.setWordWrap(True)
+        lay.addWidget(warn)
 
-        self._workerCountLabel = tk.Label(
-            titleRow, text="0개 선택",
-            font=(self._ff, 9, "bold"), fg=C["accent"], bg=C["surface"],
-        )
-        self._workerCountLabel.pack(side="right")
+        lay.addStretch()
 
-        tabRow = tk.Frame(card, bg=C["surface"])
-        tabRow.pack(fill="x")
-        self._workerTabs = {}
-        for _, (label, key) in enumerate(SUPPORTED_LLMS):
-            tab = self._tab(
-                tabRow, label, key,
-                onClick=lambda k=key: self._toggleWorker(k),
-            )
-            tab.pack(side="left", padx=(0, 24))
-            self._workerTabs[key] = tab
+        # 액션 버튼
+        self.runButton = QPushButton("▶  실행")
+        self.runButton.setObjectName("runButton")
+        self.runButton.setCursor(Qt.PointingHandCursor)
+        self.runButton.clicked.connect(self._onRunClicked)
+        lay.addWidget(self.runButton)
 
-    # ── 프롬프트 ───────────────────────────────────────────────────────────────
+        self.stopButton = QPushButton("■  중지")
+        self.stopButton.setObjectName("stopButton")
+        self.stopButton.setEnabled(False)
+        self.stopButton.clicked.connect(self._onStopClicked)
+        lay.addWidget(self.stopButton)
 
-    def _buildPromptSection(self, parent):
-        card = self._card(parent, row=3)
+        clearBtn = QPushButton("🗑  지우기")
+        clearBtn.setObjectName("clearAllButton")
+        clearBtn.setCursor(Qt.PointingHandCursor)
+        clearBtn.clicked.connect(self._clearAll)
+        lay.addWidget(clearBtn)
 
-        titleRow = tk.Frame(card, bg=C["surface"])
-        titleRow.pack(fill="x", pady=(0, 8))
-        titleRow.columnconfigure(0, weight=1)
-        tk.Label(
-            titleRow, text="프롬프트",
-            font=(self._ff, 11, "bold"), fg=C["text"], bg=C["surface"],
-        ).grid(row=0, column=0, sticky="w")
+        return sidebar
 
-        self._charCountLabel = tk.Label(
-            titleRow, text="0자",
-            font=(self._ff, 9), fg=C["text3"], bg=C["surface"],
-        )
-        self._charCountLabel.grid(row=0, column=1, sticky="e")
+    # ── 메인 콘텐츠 ───────────────────────────────────────────────────────────
 
-        tk.Label(
-            titleRow, text="Ctrl+Enter 실행",
-            font=(self._ff, 8), fg=C["text3"], bg=C["surface"],
-        ).grid(row=0, column=2, sticky="e", padx=(8, 0))
+    def _buildContent(self):
+        """우측 메인 콘텐츠 — 프롬프트, 상태, 응답 카드, 로그"""
+        content = QWidget()
+        content.setObjectName("contentArea")
+        lay = QVBoxLayout(content)
+        lay.setContentsMargins(24, 24, 24, 24)
+        lay.setSpacing(20)
 
-        # 입력 필드 (1px 테두리 래퍼)
-        self._promptWrapper = tk.Frame(card, bg=C["border"], padx=1, pady=1)
-        self._promptWrapper.pack(fill="x")
+        self._buildPromptSection(lay)
+        self._buildStatusSection(lay)
+        self._buildResponseSection(lay)
+        self._buildLogSection(lay)
 
-        self.promptText = tk.Text(
-            self._promptWrapper, height=5, wrap="word",
-            font=(self._ff, 11),
-            bg=C["inputBg"], fg=C["text3"],
-            insertbackground=C["text"],
-            selectbackground=C["accent"], selectforeground="#FFFFFF",
-            relief="flat", bd=0, padx=12, pady=10,
-        )
-        self.promptText.pack(fill="x")
+        return content
 
-        self.promptText.insert("1.0", _PLACEHOLDER)
-        self._hasPlaceholder = True
-        self.promptText.bind("<FocusIn>", self._onPromptFocusIn)
-        self.promptText.bind("<FocusOut>", self._onPromptFocusOut)
-        self.promptText.bind("<KeyRelease>", self._updateCharCount)
+    # ── 프롬프트 입력 ─────────────────────────────────────────────────────────
 
-    # ── 버튼 ───────────────────────────────────────────────────────────────────
+    def _buildPromptSection(self, parentLay):
+        """프롬프트 입력 영역 — 텍스트 에디터 + 글자 수 카운터"""
+        hdr = QHBoxLayout()
+        hdr.addWidget(self._contentTitle("프롬프트 입력"))
+        hdr.addStretch()
+        self._charCountLabel = QLabel("0 / 8000")
+        self._charCountLabel.setObjectName("charCount")
+        hdr.addWidget(self._charCountLabel)
+        parentLay.addLayout(hdr)
 
-    def _buildButtonSection(self, parent):
-        frame = tk.Frame(parent, bg=C["bg"])
-        frame.grid(row=4, column=0, sticky="ew", pady=(10, 4))
+        self.promptEdit = QTextEdit()
+        self.promptEdit.setObjectName("promptEdit")
+        self.promptEdit.setPlaceholderText("여기에 프롬프트를 입력하세요...")
+        self.promptEdit.setFixedHeight(120)
+        self.promptEdit.textChanged.connect(self._onPromptChanged)
+        parentLay.addWidget(self.promptEdit)
 
-        # 실행
-        self.runButton = self._btn(
-            frame, "▶  실행",
-            bg=C["btnPrimary"], hoverBg=C["btnPrimaryH"],
-            fg="#FFFFFF", bold=True, padx=20,
-            command=self._onRunClicked,
-        )
-        self.runButton.pack(side="left", padx=(0, 8))
+    # ── 실행 상태 대시보드 ────────────────────────────────────────────────────
 
-        # 중단
-        self.stopButton = self._btn(
-            frame, "■  중단",
-            bg=C["btnDanger"], hoverBg=C["btnDangerH"],
-            fg="#FFFFFF", padx=14,
-            command=self._onStopClicked,
-        )
-        self.stopButton.pack(side="left", padx=(0, 8))
-        self._disableBtn(self.stopButton)
+    def _buildStatusSection(self, parentLay):
+        """4개 메트릭 카드 — 진행률, 실행 시간, 완료 AI 수, 토큰"""
+        parentLay.addWidget(self._contentTitle("실행 상태"))
+        row = QHBoxLayout()
+        row.setSpacing(12)
 
-        # 지우기
-        self._btn(
-            frame, "지우기",
-            bg=C["btnSecondary"], hoverBg=C["btnSecondaryH"],
-            fg=C["text2"], command=self._clearPrompt,
-        ).pack(side="left", padx=(0, 6))
+        metricsInfo = [
+            ("progress",  "전체 진행률",  "0%"),
+            ("elapsed",   "실행 시간",    "00:00:00"),
+            ("completed", "완료한 AI",    "0 / 0"),
+            ("tokens",    "토큰 사용량",  "—"),
+        ]
+        for metricKey, title, defaultVal in metricsInfo:
+            card = QFrame()
+            card.setObjectName("metricCard")
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(16, 12, 16, 12)
+            cl.setSpacing(4)
 
-        # 결과 복사
-        self._btn(
-            frame, "결과 복사",
-            bg=C["btnSecondary"], hoverBg=C["btnSecondaryH"],
-            fg=C["text2"], command=self._copyOutput,
-        ).pack(side="left", padx=(0, 6))
+            titleLbl = QLabel(title)
+            titleLbl.setObjectName("metricTitle")
+            cl.addWidget(titleLbl)
 
-        # 종료
-        self.exitButton = self._btn(
-            frame, "종료",
-            bg=C["bg"], hoverBg=C["btnSecondary"],
-            fg=C["text3"], command=self._onClose,
-        )
-        self.exitButton.pack(side="right")
+            valLbl = QLabel(defaultVal)
+            valLbl.setObjectName("metricValue")
+            cl.addWidget(valLbl)
 
-    # ── 프로그레스 ─────────────────────────────────────────────────────────────
+            row.addWidget(card)
+            self._metricLabels[metricKey] = valLbl
 
-    def _buildProgressSection(self, parent):
-        self.progressFrame = tk.Frame(parent, bg=C["bg"])
-        self.progressFrame.grid(row=5, column=0, sticky="ew", pady=(4, 8))
-        self.progressFrame.columnconfigure(0, weight=1)
+        parentLay.addLayout(row)
 
-        labelRow = tk.Frame(self.progressFrame, bg=C["bg"])
-        labelRow.grid(row=0, column=0, sticky="ew", pady=(0, 4))
-        labelRow.columnconfigure(0, weight=1)
+    # ── AI 응답 결과 ──────────────────────────────────────────────────────────
 
-        self.progressLabel = tk.Label(
-            labelRow, text="",
-            font=(self._ff, 9), fg=C["text2"], bg=C["bg"], anchor="w",
-        )
-        self.progressLabel.grid(row=0, column=0, sticky="w")
+    def _buildResponseSection(self, parentLay):
+        """응답 카드 영역 — 카드/리스트 뷰 토글 + 종합 결과 + LLM 카드"""
+        # 헤더 (타이틀 + 뷰 전환 버튼)
+        hdr = QHBoxLayout()
+        hdr.addWidget(self._contentTitle("AI 응답 결과"))
+        hdr.addStretch()
 
-        self._progressPercent = tk.Label(
-            labelRow, text="",
-            font=(self._ff, 9, "bold"), fg=C["accent"], bg=C["bg"],
-        )
-        self._progressPercent.grid(row=0, column=1, sticky="e")
+        self._cardViewBtn = QPushButton("카드 보기")
+        self._cardViewBtn.setObjectName("viewToggle")
+        self._cardViewBtn.setCheckable(True)
+        self._cardViewBtn.setChecked(True)
+        self._cardViewBtn.setCursor(Qt.PointingHandCursor)
+        self._cardViewBtn.clicked.connect(lambda: self._setViewMode(True))
+        hdr.addWidget(self._cardViewBtn)
 
-        self._progressCanvas = tk.Canvas(
-            self.progressFrame, height=4,
-            bg=C["progressTrack"], highlightthickness=0, bd=0,
-        )
-        self._progressCanvas.grid(row=1, column=0, sticky="ew")
-        self._progressValue = 0
-        self._progressCanvas.bind("<Configure>", self._drawProgress)
-        self.progressFrame.grid_remove()
+        self._listViewBtn = QPushButton("리스트 보기")
+        self._listViewBtn.setObjectName("viewToggle")
+        self._listViewBtn.setCheckable(True)
+        self._listViewBtn.setCursor(Qt.PointingHandCursor)
+        self._listViewBtn.clicked.connect(lambda: self._setViewMode(False))
+        hdr.addWidget(self._listViewBtn)
 
-    # ── 최종 결과 ──────────────────────────────────────────────────────────────
+        parentLay.addLayout(hdr)
 
-    def _buildOutputSection(self, parent):
-        card = self._card(parent, row=6, expand=True, weight=3)
+        # 종합 결과 카드 (실행 완료 후 표시)
+        self._synthesisCard = QFrame()
+        self._synthesisCard.setObjectName("synthesisCard")
+        self._synthesisCard.setVisible(False)
+        sl = QVBoxLayout(self._synthesisCard)
+        sl.setContentsMargins(16, 14, 16, 14)
+        sl.setSpacing(8)
 
-        titleRow = tk.Frame(card, bg=C["surface"])
-        titleRow.pack(fill="x", pady=(0, 8))
-        tk.Label(
-            titleRow, text="최종 합성 결과",
-            font=(self._ff, 11, "bold"), fg=C["text"], bg=C["surface"],
-        ).pack(side="left")
-        self._outputLenLabel = tk.Label(
-            titleRow, text="",
-            font=(self._ff, 9), fg=C["text3"], bg=C["surface"],
-        )
-        self._outputLenLabel.pack(side="right")
+        synthHdr = QHBoxLayout()
+        synthTitleLbl = QLabel("📋 종합 결과")
+        synthTitleLbl.setObjectName("synthesisTitle")
+        synthHdr.addWidget(synthTitleLbl)
+        synthHdr.addStretch()
+        copyBtn = QPushButton("복사")
+        copyBtn.setObjectName("smallBtn")
+        copyBtn.setCursor(Qt.PointingHandCursor)
+        copyBtn.clicked.connect(self._copySynthesis)
+        synthHdr.addWidget(copyBtn)
+        sl.addLayout(synthHdr)
 
-        textFrame = tk.Frame(card, bg=C["border"], padx=1, pady=1)
-        textFrame.pack(fill="both", expand=True)
-        self.outputText = tk.Text(
-            textFrame, wrap="word", state="disabled",
-            font=(self._ff, 11),
-            bg=C["inputBg"], fg=C["text"],
-            insertbackground=C["text"],
-            selectbackground=C["accent"], selectforeground="#FFFFFF",
-            relief="flat", bd=0, padx=12, pady=10,
-        )
-        sb = tk.Scrollbar(textFrame, command=self.outputText.yview)
-        sb.pack(side="right", fill="y")
-        self.outputText.pack(side="left", fill="both", expand=True)
-        self.outputText["yscrollcommand"] = sb.set
+        self._synthesisText = QTextEdit()
+        self._synthesisText.setObjectName("synthesisTextEdit")
+        self._synthesisText.setReadOnly(True)
+        self._synthesisText.setMaximumHeight(200)
+        sl.addWidget(self._synthesisText)
+        parentLay.addWidget(self._synthesisCard)
 
-    # ── 진행 로그 ──────────────────────────────────────────────────────────────
+        # 응답 카드 스크롤 영역
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setObjectName("responseScroll")
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-    def _buildLogSection(self, parent):
-        card = self._card(parent, row=7, expand=True, weight=1)
+        self._cardsContainer = QWidget()
+        self._cardsContainer.setObjectName("cardsContainer")
+        self._cardsLayout = QGridLayout(self._cardsContainer)
+        self._cardsLayout.setSpacing(12)
+        self._cardsLayout.setContentsMargins(0, 0, 4, 0)
 
-        titleRow = tk.Frame(card, bg=C["surface"])
-        titleRow.pack(fill="x", pady=(0, 8))
-        tk.Label(
-            titleRow, text="진행 로그",
-            font=(self._ff, 11, "bold"), fg=C["text"], bg=C["surface"],
-        ).pack(side="left")
+        # 5개 LLM 응답 카드 생성
+        for i, (displayName, key) in enumerate(SUPPORTED_LLMS):
+            card = self._createResponseCard(key, displayName)
+            self._responseCards[key] = card
+            self._cardsLayout.addWidget(card, i // 2, i % 2)
 
-        textFrame = tk.Frame(card, bg=C["logBorder"], padx=1, pady=1)
-        textFrame.pack(fill="both", expand=True)
-        self.logText = tk.Text(
-            textFrame, wrap="word", state="disabled",
-            font=(self._mf, 9),
-            bg=C["logBg"], fg=C["text2"],
-            insertbackground=C["text"],
-            selectbackground=C["accent"], selectforeground="#FFFFFF",
-            relief="flat", bd=0, padx=12, pady=8,
-        )
-        sb = tk.Scrollbar(textFrame, command=self.logText.yview)
-        sb.pack(side="right", fill="y")
-        self.logText.pack(side="left", fill="both", expand=True)
-        self.logText["yscrollcommand"] = sb.set
+        scroll.setWidget(self._cardsContainer)
+        parentLay.addWidget(scroll, stretch=2)
 
-        self.logText.tag_config("error", foreground=C["error"])
-        self.logText.tag_config("success", foreground="#2D9E46")
-        self.logText.tag_config("phase", foreground=C["warning"])
-        self.logText.tag_config("info", foreground=C["accent"])
-
-    # ── 상태 바 ────────────────────────────────────────────────────────────────
-
-    def _buildStatusBar(self):
-        bar = tk.Frame(self.root, bg=C["statusBar"], height=26)
-        bar.grid(row=1, column=0, sticky="ew")
-        bar.grid_propagate(False)
-
-        self._statusDot = tk.Canvas(
-            bar, width=8, height=8, bg=C["statusBar"], highlightthickness=0,
-        )
-        self._statusDot.pack(side="left", padx=(12, 6), pady=9)
-        self._statusDot.create_oval(0, 0, 8, 8, fill=C["success"], outline="")
-
-        self.statusLabel = tk.Label(
-            bar, text="대기 중",
-            font=(self._ff, 9), fg=C["text2"], bg=C["statusBar"], anchor="w",
-        )
-        self.statusLabel.pack(side="left", fill="x")
-
-    # ── 위젯 헬퍼: 카드 ──────────────────────────────────────────────────────
-
-    def _card(self, parent, row, expand=False, weight=0):
-        outer = tk.Frame(parent, bg=C["border"], padx=1, pady=1)
-        outer.grid(
-            row=row, column=0,
-            sticky="nsew" if expand else "ew",
-            pady=(0, 10),
-        )
-        if expand:
-            parent.rowconfigure(row, weight=weight)
-        inner = tk.Frame(outer, bg=C["surface"], padx=16, pady=14)
-        inner.pack(fill="both", expand=True)
-        return inner
-
-    # ── 위젯 헬퍼: 밑줄 탭 ───────────────────────────────────────────────────
-
-    def _tab(self, parent, label, key, onClick=None):
-        """밑줄 스타일 탭 — 선택 시 브랜드 컬러 밑줄 표시"""
+    def _createResponseCard(self, key: str, displayName: str):
+        """개별 LLM 응답 카드 — 아이콘, 이름, 상태 뱃지, 응답 텍스트"""
         brandColor = LLM_COLORS.get(key, C["accent"])
+        cardId = f"rcard_{key}"
 
-        frame = tk.Frame(parent, bg=C["surface"], cursor="hand2")
+        card = QFrame()
+        card.setObjectName(cardId)
+        card.setStyleSheet(f"""
+            #{cardId} {{
+                background: {C["surface"]};
+                border: 1px solid {C["border"]};
+                border-left: 3px solid {brandColor};
+                border-radius: 8px;
+            }}
+        """)
 
-        textLabel = tk.Label(
-            frame, text=label,
-            font=(self._ff, 11), fg=C["text2"], bg=C["surface"],
-            cursor="hand2", pady=4,
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(8)
+
+        # 헤더 행 (아이콘 + 이름 + 상태 뱃지)
+        hdr = QHBoxLayout()
+        hdr.setSpacing(8)
+        iconLbl = QLabel()
+        px = _loadIcon(key, 22)
+        if not px.isNull():
+            iconLbl.setPixmap(px)
+        iconLbl.setFixedSize(22, 22)
+        hdr.addWidget(iconLbl)
+
+        nameLbl = QLabel(displayName)
+        nameLbl.setStyleSheet(
+            f"font-weight: bold; font-size: 13px; color: {C['text']};"
         )
-        textLabel.pack()
+        hdr.addWidget(nameLbl)
+        hdr.addStretch()
 
-        # 밑줄 바 (미선택 시 투명 = surface 배경과 동일)
-        underline = tk.Frame(frame, height=2, bg=C["surface"])
-        underline.pack(fill="x", pady=(2, 0))
+        statusLbl = QLabel("대기 중")
+        statusLbl.setObjectName("cardStatus")
+        statusLbl.setProperty("status", "waiting")
+        hdr.addWidget(statusLbl)
+        lay.addLayout(hdr)
 
-        # 내부 상태
-        frame._key = key
-        frame._isSelected = False
-        frame._isDisabled = False
-        frame._brandColor = brandColor
-        frame._textLabel = textLabel
-        frame._underline = underline
+        # 응답 텍스트
+        respLbl = QLabel("")
+        respLbl.setWordWrap(True)
+        respLbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        respLbl.setStyleSheet(f"font-size: 12px; color: {C['text2']};")
+        respLbl.setMinimumHeight(30)
+        lay.addWidget(respLbl)
 
-        for w in (frame, textLabel):
-            w.bind("<Button-1>", lambda e, cb=onClick: cb() if cb else None)
-        return frame
+        # 카드 내부 참조
+        card._statusLabel = statusLbl
+        card._responseLabel = respLbl
 
-    # ── 위젯 헬퍼: 버튼 ──────────────────────────────────────────────────────
+        return card
 
-    def _btn(self, parent, text, bg, hoverBg,
-             command=None, fg="#FFFFFF", bold=False, padx=14):
-        b = tk.Button(
-            parent, text=text, command=command,
-            font=(self._ff, 10, "bold" if bold else "normal"),
-            fg=fg, bg=bg,
-            activeforeground=fg, activebackground=hoverBg,
-            disabledforeground=C["disabledText"],
-            relief="flat", bd=0, cursor="hand2",
-            padx=padx, pady=6,
-        )
-        b._normalBg = bg
-        b._hoverBg = hoverBg
-        b._normalFg = fg
-        b.bind("<Enter>", lambda e, btn=b: self._btnEnter(btn))
-        b.bind("<Leave>", lambda e, btn=b: self._btnLeave(btn))
-        return b
+    # ── 실행 로그 ─────────────────────────────────────────────────────────────
 
-    def _btnEnter(self, b):
-        if str(b["state"]) != "disabled":
-            b.configure(bg=b._hoverBg)
+    def _buildLogSection(self, parentLay):
+        """실행 로그 영역 — 타임스탬프 + 색상 코딩된 로그"""
+        hdr = QHBoxLayout()
+        hdr.addWidget(self._contentTitle("실행 로그"))
+        hdr.addStretch()
+        clrBtn = QPushButton("지우기")
+        clrBtn.setObjectName("smallBtn")
+        clrBtn.setCursor(Qt.PointingHandCursor)
+        clrBtn.clicked.connect(self._clearLog)
+        hdr.addWidget(clrBtn)
+        parentLay.addLayout(hdr)
 
-    def _btnLeave(self, b):
-        if str(b["state"]) != "disabled":
-            b.configure(bg=b._normalBg)
+        self.logText = QTextEdit()
+        self.logText.setObjectName("logText")
+        self.logText.setReadOnly(True)
+        self.logText.setFixedHeight(150)
+        parentLay.addWidget(self.logText, stretch=1)
 
-    def _disableBtn(self, b):
-        b.configure(state="disabled", bg=C["disabledBg"], cursor="")
+    # ── 헬퍼 위젯 팩토리 ─────────────────────────────────────────────────────
 
-    def _enableBtn(self, b):
-        b.configure(state="normal", bg=b._normalBg, cursor="hand2")
+    def _divider(self):
+        """수평 구분선"""
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setObjectName("divider")
+        return line
 
-    # ── 탭 상태 갱신 ──────────────────────────────────────────────────────────
+    def _sectionLabel(self, text: str):
+        """사이드바 섹션 라벨"""
+        lbl = QLabel(text)
+        lbl.setObjectName("sectionLabel")
+        return lbl
 
-    def _selectHead(self, key):
-        self.headVar.set(key)
-        self._refreshHeadTabs()
-        self._onHeadChanged()
+    def _contentTitle(self, text: str):
+        """콘텐츠 영역 섹션 타이틀"""
+        lbl = QLabel(text)
+        lbl.setObjectName("contentSectionTitle")
+        return lbl
 
-    def _toggleWorker(self, key):
-        # Head와 동일한 LLM 선택 시도 → 경고
-        if key == self.headVar.get():
-            self._setStatus(
-                "Head LLM은 Worker로 선택할 수 없습니다", "warning"
-            )
-            return
-        tab = self._workerTabs.get(key)
-        if tab and tab._isDisabled:
-            self._setStatus(
-                "Head LLM은 Worker로 선택할 수 없습니다", "warning"
-            )
-            return
-        self.workerVars[key].set(not self.workerVars[key].get())
-        self._refreshWorkerTabs()
+    # ── 타이머 설정 ───────────────────────────────────────────────────────────
 
-    def _refreshHeadTabs(self):
-        sel = self.headVar.get()
-        for key, tab in self._headTabs.items():
-            selected = key == sel
-            tab._isSelected = selected
-            if selected:
-                tab._textLabel.configure(
-                    fg=C["text"], font=(self._ff, 11, "bold"),
-                )
-                tab._underline.configure(bg=tab._brandColor)
-            else:
-                tab._textLabel.configure(
-                    fg=C["text2"], font=(self._ff, 11),
-                )
-                tab._underline.configure(bg=C["surface"])
+    def _setupTimers(self):
+        """이벤트 큐 폴링 + 경과 시간 타이머"""
+        self._pollTimer = QTimer(self)
+        self._pollTimer.timeout.connect(self._pollEventQueue)
+        self._elapsedTimer = QTimer(self)
+        self._elapsedTimer.timeout.connect(self._updateElapsedTime)
 
-    def _refreshWorkerTabs(self):
-        head = self.headVar.get()
-        count = 0
-        for key, tab in self._workerTabs.items():
-            disabled = key == head
-            selected = self.workerVars[key].get() and not disabled
-            tab._isDisabled = disabled
-            tab._isSelected = selected
-
-            if disabled:
-                tab._textLabel.configure(
-                    fg=C["disabledText"], font=(self._ff, 11),
-                    cursor="arrow",
-                )
-                tab._underline.configure(bg=C["surface"])
-                tab.configure(cursor="arrow")
-            elif selected:
-                count += 1
-                tab._textLabel.configure(
-                    fg=C["text"], font=(self._ff, 11, "bold"),
-                    cursor="hand2",
-                )
-                tab._underline.configure(bg=tab._brandColor)
-                tab.configure(cursor="hand2")
-            else:
-                tab._textLabel.configure(
-                    fg=C["text2"], font=(self._ff, 11),
-                    cursor="hand2",
-                )
-                tab._underline.configure(bg=C["surface"])
-                tab.configure(cursor="hand2")
-
-        self._workerCountLabel.configure(text=f"{count}개 선택")
-
-    # ── 프로그레스 렌더링 ──────────────────────────────────────────────────────
-
-    def _drawProgress(self, event=None):
-        cv = self._progressCanvas
-        cv.delete("all")
-        w, h = cv.winfo_width(), cv.winfo_height()
-        cv.create_rectangle(0, 0, w, h, fill=C["progressTrack"], outline="")
-        if self._progressValue > 0:
-            cv.create_rectangle(
-                0, 0, int(w * self._progressValue / 100), h,
-                fill=C["accent"], outline="",
-            )
-
-    # ── 설정 적용 ──────────────────────────────────────────────────────────────
+    # ── 저장된 설정 복원 ──────────────────────────────────────────────────────
 
     def _applySavedConfig(self):
+        """config.json에서 Head/Worker 설정 복원"""
         headVal = self.config.get("head", "claude")
         workerList = self.config.get("workers", ["chatgpt", "gemini"])
-        self.headVar.set(headVal)
-        for key, var in self.workerVars.items():
-            var.set(key in workerList)
-        self._refreshHeadTabs()
-        self._refreshWorkerTabs()
 
-    # ── 플레이스홀더 ──────────────────────────────────────────────────────────
+        for i in range(self.headCombo.count()):
+            if self.headCombo.itemData(i) == headVal:
+                self.headCombo.setCurrentIndex(i)
+                break
 
-    def _onPromptFocusIn(self, event):
-        self._promptWrapper.configure(bg=C["borderFocus"])
-        if self._hasPlaceholder:
-            self.promptText.delete("1.0", "end")
-            self.promptText.configure(fg=C["text"])
-            self._hasPlaceholder = False
+        for key, info in self._workerCheckboxes.items():
+            info["checkbox"].setChecked(key in workerList)
 
-    def _onPromptFocusOut(self, event):
-        self._promptWrapper.configure(bg=C["border"])
-        if not self.promptText.get("1.0", "end").strip():
-            self.promptText.insert("1.0", _PLACEHOLDER)
-            self.promptText.configure(fg=C["text3"])
-            self._hasPlaceholder = True
+    # ── Worker 상태 동기화 ────────────────────────────────────────────────────
 
-    def _getPromptText(self) -> str:
-        if self._hasPlaceholder:
-            return ""
-        return self.promptText.get("1.0", "end").strip()
+    def _updateWorkerStates(self):
+        """Head LLM과 동일한 Worker 비활성화 + 힌트 표시"""
+        headKey = self.headCombo.currentData()
+        for key, info in self._workerCheckboxes.items():
+            cb, hint = info["checkbox"], info["hint"]
+            isHead = key == headKey
+            if isHead:
+                cb.setChecked(False)
+                cb.setEnabled(False)
+                hint.setText("(Head LLM과 동일)")
+                hint.setVisible(True)
+            else:
+                cb.setEnabled(True)
+                hint.setVisible(False)
 
-    def _updateCharCount(self, event=None):
-        self._charCountLabel.configure(text=f"{len(self._getPromptText())}자")
+    # ── 이벤트 핸들러 ─────────────────────────────────────────────────────────
 
-    # ── 이벤트 핸들러 ──────────────────────────────────────────────────────────
+    def _onHeadChanged(self, _index):
+        """Head LLM 드롭다운 변경 시 Worker 상태 갱신"""
+        self._updateWorkerStates()
 
-    def _onHeadChanged(self, *args):
-        sel = self.headVar.get()
-        if self.workerVars[sel].get():
-            self.workerVars[sel].set(False)
-        self._refreshHeadTabs()
-        self._refreshWorkerTabs()
+    def _onWorkerToggled(self, key):
+        """Head와 동일한 Worker 선택 방지"""
+        if key == self.headCombo.currentData():
+            self._workerCheckboxes[key]["checkbox"].setChecked(False)
+
+    def _onPromptChanged(self):
+        """프롬프트 입력 시 글자 수 업데이트 + 초과 경고"""
+        n = len(self.promptEdit.toPlainText())
+        self._charCountLabel.setText(f"{n} / {MAX_PROMPT_LENGTH}")
+        overLimit = n > MAX_PROMPT_LENGTH
+        self._charCountLabel.setStyleSheet(
+            f"color: {C['error']};" if overLimit else f"color: {C['text3']};"
+        )
 
     def _onRunClicked(self):
-        prompt = self._getPromptText()
+        """실행 버튼 — 입력 검증 후 오케스트레이터 실행"""
+        prompt = self.promptEdit.toPlainText().strip()
         if not prompt:
-            messagebox.showwarning("입력 오류", "프롬프트를 입력해주세요.")
+            QMessageBox.warning(self, "입력 오류", "프롬프트를 입력해주세요.")
             return
-
-        head = self.headVar.get()
-        workers = [
-            k for k, v in self.workerVars.items()
-            if v.get() and k != head
-        ]
-        if not workers:
-            messagebox.showwarning(
-                "설정 오류", "Worker LLM을 최소 1개 이상 선택해주세요."
+        if len(prompt) > MAX_PROMPT_LENGTH:
+            QMessageBox.warning(
+                self, "입력 오류",
+                f"프롬프트가 {MAX_PROMPT_LENGTH}자를 초과합니다.",
             )
             return
 
-        self.configManager.save(head, workers, geometry=self.root.geometry())
+        head = self.headCombo.currentData()
+        workers = [
+            k for k, info in self._workerCheckboxes.items()
+            if info["checkbox"].isChecked() and k != head
+        ]
+        if not workers:
+            QMessageBox.warning(
+                self, "설정 오류",
+                "Worker LLM을 최소 1개 이상 선택해주세요.",
+            )
+            return
+
+        # 설정 저장 및 로그
+        self._saveConfig()
         writeLog(f"실행 시작 | Head={head} | Workers={workers}")
 
+        # 상태 초기화
+        self._workerCount = len(workers)
+        self._completedWorkers = 0
         self._setRunningState(True)
-        self._clearOutput()
-        self._clearLog()
+        self._resetCards(head, workers)
+        self.logText.clear()
+        self._synthesisCard.setVisible(False)
+        self._updateMetric("progress", "0%")
+        self._updateMetric("elapsed", "00:00:00")
+        self._updateMetric("tokens", "—")
 
+        # 오케스트레이터 백그라운드 실행
         self._stopEvent.clear()
         self.eventQueue = queue.Queue()
         orch = Orchestrator(
@@ -662,168 +602,545 @@ class MultiMindApp:
         )
         threading.Thread(target=orch.run, daemon=True).start()
         self._polling = True
-        self.root.after(POLL_INTERVAL_MS, self._pollEventQueue)
+        self._pollTimer.start(POLL_INTERVAL_MS)
+        self._startTime = time.time()
+        self._elapsedTimer.start(1000)
 
     def _onStopClicked(self):
-        if messagebox.askyesno("실행 중단", "진행 중인 작업을 중단하시겠습니까?"):
+        """중지 버튼 — 확인 후 실행 중단"""
+        reply = QMessageBox.question(
+            self, "실행 중단", "진행 중인 작업을 중단하시겠습니까?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
             self._stopEvent.set()
-            self._appendLog("사용자에 의해 실행이 중단되었습니다.", tag="error")
-            self._setStatus("중단됨", "error")
+            self._appendLog("사용자에 의해 실행이 중단되었습니다.", "error")
             self._finish()
 
-    def _onClose(self):
-        if self._polling:
-            if not messagebox.askyesno(
-                "종료 확인", "작업이 진행 중입니다. 종료하시겠습니까?"
-            ):
-                return
-            self._stopEvent.set()
-        self.configManager.save(
-            self.headVar.get(),
-            [k for k, v in self.workerVars.items() if v.get()],
-            geometry=self.root.geometry(),
-        )
-        self.root.destroy()
+    # ── 액션 핸들러 ───────────────────────────────────────────────────────────
 
-    def _copyOutput(self):
-        val = self.outputText.get("1.0", "end").strip()
-        if val:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(val)
-            self._setStatus("결과가 클립보드에 복사되었습니다", "success")
-        else:
-            self._setStatus("복사할 결과가 없습니다", "warning")
+    def _clearAll(self):
+        """전체 초기화 — 프롬프트, 결과, 로그, 메트릭"""
+        self.promptEdit.clear()
+        self.logText.clear()
+        self._resetAllCards()
+        self._synthesisCard.setVisible(False)
+        self._updateMetric("progress", "0%")
+        self._updateMetric("elapsed", "00:00:00")
+        self._updateMetric("completed", "0 / 0")
+        self._updateMetric("tokens", "—")
 
-    def _clearPrompt(self):
-        self.promptText.delete("1.0", "end")
-        self.promptText.insert("1.0", _PLACEHOLDER)
-        self.promptText.configure(fg=C["text3"])
-        self._hasPlaceholder = True
-        self._updateCharCount()
+    def _clearLog(self):
+        """로그 텍스트만 초기화"""
+        self.logText.clear()
 
-    # ── 이벤트 큐 ──────────────────────────────────────────────────────────────
+    def _copySynthesis(self):
+        """종합 결과를 클립보드에 복사"""
+        text = self._synthesisText.toPlainText()
+        if text:
+            QApplication.clipboard().setText(text)
+
+    # ── 뷰 모드 전환 ─────────────────────────────────────────────────────────
+
+    def _setViewMode(self, cardMode: bool):
+        """카드/리스트 뷰 토글"""
+        self._cardViewMode = cardMode
+        self._cardViewBtn.setChecked(cardMode)
+        self._listViewBtn.setChecked(not cardMode)
+        self._rearrangeCards()
+
+    def _rearrangeCards(self):
+        """현재 뷰 모드에 맞게 카드 그리드 재배치"""
+        while self._cardsLayout.count():
+            self._cardsLayout.takeAt(0)
+
+        cols = 2 if self._cardViewMode else 1
+        for i, card in enumerate(self._responseCards.values()):
+            self._cardsLayout.addWidget(card, i // cols, i % cols)
+
+    # ── 카드 상태 관리 ────────────────────────────────────────────────────────
+
+    def _resetCards(self, head: str, workers: list):
+        """실행 시작 시 카드 상태 초기화"""
+        for key, card in self._responseCards.items():
+            if key == head:
+                self._setCardStatus(card, "head", "Head LLM")
+            elif key in workers:
+                self._setCardStatus(card, "waiting", "대기 중")
+            else:
+                self._setCardStatus(card, "waiting", "미선택")
+            card._responseLabel.setText("")
+
+    def _resetAllCards(self):
+        """모든 카드를 대기 상태로 리셋"""
+        for card in self._responseCards.values():
+            self._setCardStatus(card, "waiting", "대기 중")
+            card._responseLabel.setText("")
+
+    def _setCardStatus(self, card, status: str, text: str):
+        """카드 상태 뱃지 업데이트 — QSS 동적 프로퍼티 반영"""
+        lbl = card._statusLabel
+        lbl.setText(text)
+        lbl.setProperty("status", status)
+        lbl.style().unpolish(lbl)
+        lbl.style().polish(lbl)
+
+    # ── 메트릭 업데이트 ───────────────────────────────────────────────────────
+
+    def _updateMetric(self, key: str, val: str):
+        """메트릭 카드 값 갱신"""
+        lbl = self._metricLabels.get(key)
+        if lbl:
+            lbl.setText(val)
+
+    def _updateElapsedTime(self):
+        """매초 호출 — 경과 시간 표시 업데이트"""
+        if self._startTime is None:
+            return
+        elapsed = int(time.time() - self._startTime)
+        h, rem = divmod(elapsed, 3600)
+        m, s = divmod(rem, 60)
+        self._updateMetric("elapsed", f"{h:02d}:{m:02d}:{s:02d}")
+
+    # ── 이벤트 큐 폴링 ───────────────────────────────────────────────────────
 
     def _pollEventQueue(self):
+        """QTimer 콜백 — 큐에서 이벤트를 꺼내 처리"""
         if not self._polling:
             return
         try:
             while True:
-                ev = self.eventQueue.get_nowait()
-                self._handleEvent(ev)
+                self._handleEvent(self.eventQueue.get_nowait())
         except queue.Empty:
             pass
-        self.root.after(POLL_INTERVAL_MS, self._pollEventQueue)
 
     def _handleEvent(self, ev: dict):
+        """오케스트레이터 이벤트 타입별 UI 업데이트"""
         t = ev.get("type")
+
         if t == "log":
             self._appendLog(ev["message"])
+
         elif t == "phase":
-            self._appendLog(
-                f"[Phase {ev['phase']}] {ev['description']}", tag="phase"
-            )
-            self._setStatus(ev["description"], "info")
-            self._updateProgress(ev["phase"], ev["description"])
+            phase = ev["phase"]
+            self._appendLog(f"[Phase {phase}] {ev['description']}", "phase")
+            # 진행률 매핑
+            pMap = {0: "10%", 1: "30%", 2: "60%", 3: "85%", 4: "100%"}
+            self._updateMetric("progress", pMap.get(phase, "0%"))
+            # Phase 2 진입 시 Worker 카드 → 진행 중
+            if phase == 2:
+                headKey = self.headCombo.currentData()
+                for key, card in self._responseCards.items():
+                    if key != headKey and self._workerCheckboxes[key][
+                        "checkbox"
+                    ].isChecked():
+                        self._setCardStatus(card, "running", "진행 중")
+
         elif t == "worker_done":
-            self._appendLog(
-                f"[{ev['llm'].upper()}] 응답 수신 완료", tag="success"
+            llm = ev["llm"]
+            card = self._responseCards.get(llm)
+            if card:
+                self._setCardStatus(card, "done", "완료")
+                txt = ev.get("result", "")
+                display = txt[:500] + "..." if len(txt) > 500 else txt
+                card._responseLabel.setText(display)
+            self._completedWorkers += 1
+            self._updateMetric(
+                "completed", f"{self._completedWorkers} / {self._workerCount}",
             )
+            self._appendLog(f"[{llm.upper()}] 응답 수신 완료", "success")
+
         elif t == "worker_error":
-            self._appendLog(
-                f"[{ev['llm'].upper()}] 오류: {ev['error']}", tag="error"
+            llm = ev["llm"]
+            card = self._responseCards.get(llm)
+            if card:
+                self._setCardStatus(card, "error", "오류")
+                card._responseLabel.setText(ev.get("error", ""))
+            self._completedWorkers += 1
+            self._updateMetric(
+                "completed", f"{self._completedWorkers} / {self._workerCount}",
             )
+            self._appendLog(
+                f"[{llm.upper()}] 오류: {ev.get('error', '')}", "error",
+            )
+
         elif t == "final_result":
-            self._setOutput(ev["text"])
-            self._appendLog("오케스트레이션 완료", tag="success")
-            self._setStatus("완료", "success")
-            self._updateProgress(4, "완료")
-            self._finish()
-        elif t == "fatal_error":
-            self._appendLog(f"오류: {ev['error']}", tag="error")
-            messagebox.showerror("실행 오류", ev["error"])
-            self._setStatus("오류 발생", "error")
-            self._finish()
-        elif t == "stopped":
-            self._appendLog("실행이 중단되었습니다.", tag="error")
-            self._setStatus("중단됨", "error")
+            self._synthesisCard.setVisible(True)
+            self._synthesisText.setPlainText(ev["text"])
+            self._updateMetric("progress", "100%")
+            self._appendLog("오케스트레이션 완료", "success")
             self._finish()
 
-    # ── 상태 전환 ──────────────────────────────────────────────────────────────
+        elif t == "fatal_error":
+            self._appendLog(f"오류: {ev['error']}", "error")
+            QMessageBox.critical(self, "실행 오류", ev["error"])
+            self._finish()
+
+        elif t == "stopped":
+            self._appendLog("실행이 중단되었습니다.", "error")
+            self._finish()
+
+    # ── 실행 상태 전환 ────────────────────────────────────────────────────────
 
     def _finish(self):
+        """실행 완료/중단 — 타이머 정지 및 UI 복원"""
         self._polling = False
+        self._pollTimer.stop()
+        self._elapsedTimer.stop()
         self._setRunningState(False)
 
     def _setRunningState(self, running: bool):
+        """실행/대기 상태에 따라 위젯 활성화 전환"""
+        self.runButton.setEnabled(not running)
+        self.stopButton.setEnabled(running)
+        self.stopButton.setCursor(
+            Qt.PointingHandCursor if running else Qt.ArrowCursor,
+        )
+        self.headCombo.setEnabled(not running)
         if running:
-            self._disableBtn(self.runButton)
-            self._enableBtn(self.stopButton)
-            self.stopButton.configure(bg=C["btnDanger"])
-            self.exitButton.configure(state="disabled", cursor="")
-            self._progressValue = 0
-            self.progressLabel.configure(text="")
-            self._progressPercent.configure(text="")
-            self.progressFrame.grid()
-            self._drawProgress()
-            self._setStatus("실행 중...", "info")
+            for info in self._workerCheckboxes.values():
+                info["checkbox"].setEnabled(False)
+            self._updateMetric("completed", f"0 / {self._workerCount}")
         else:
-            self._enableBtn(self.runButton)
-            self.runButton.configure(bg=C["btnPrimary"])
-            self._disableBtn(self.stopButton)
-            self._enableBtn(self.exitButton)
-            self.exitButton.configure(bg=self.exitButton._normalBg)
+            self._updateWorkerStates()
 
-    def _updateProgress(self, phase: int, desc: str):
-        mapping = {0: 10, 1: 30, 2: 60, 3: 85, 4: 100}
-        val = mapping.get(phase, 0)
-        self._progressValue = val
-        self._drawProgress()
-        names = {
-            0: "브라우저 시작", 1: "프롬프트 정제",
-            2: "Worker 응답 생성", 3: "결과 종합", 4: "완료",
-        }
-        self.progressLabel.configure(
-            text=f"Phase {phase}/4 · {names.get(phase, desc)}"
-        )
-        self._progressPercent.configure(text=f"{val}%")
-
-    def _setStatus(self, text: str, level: str = "info"):
-        colors = {
-            "info": C["info"], "success": C["success"],
-            "error": C["error"], "warning": C["warning"],
-        }
-        self._statusDot.delete("all")
-        self._statusDot.create_oval(
-            0, 0, 8, 8, fill=colors.get(level, C["text2"]), outline=""
-        )
-        self.statusLabel.configure(text=text)
-
-    # ── 텍스트 헬퍼 ──────────────────────────────────────────────────────────
+    # ── 로그 출력 ─────────────────────────────────────────────────────────────
 
     def _appendLog(self, msg: str, tag: str = None):
-        self.logText.configure(state="normal")
-        line = f"› {msg}\n"
-        if tag:
-            self.logText.insert("end", line, tag)
-        else:
-            self.logText.insert("end", line)
-        self.logText.see("end")
-        self.logText.configure(state="disabled")
+        """타임스탬프 + 색상 코딩된 로그 메시지 추가"""
+        colorMap = {
+            "error": C["error"], "success": C["success"],
+            "phase": C["warning"], "info": C["accent"],
+        }
+        color = colorMap.get(tag, C["text2"])
+        ts = time.strftime("%H:%M:%S")
+        escaped = htmlLib.escape(msg)
+        self.logText.append(
+            f'<span style="color:{C["text3"]}">{ts}</span> '
+            f'<span style="color:{color}">› {escaped}</span>'
+        )
 
-    def _setOutput(self, text: str):
-        self.outputText.configure(state="normal")
-        self.outputText.delete("1.0", "end")
-        self.outputText.insert("1.0", text)
-        self.outputText.configure(state="disabled")
-        self._outputLenLabel.configure(text=f"{len(text)}자")
+    # ── 설정 저장 ─────────────────────────────────────────────────────────────
 
-    def _clearOutput(self):
-        self.outputText.configure(state="normal")
-        self.outputText.delete("1.0", "end")
-        self.outputText.configure(state="disabled")
-        self._outputLenLabel.configure(text="")
+    def _saveConfig(self):
+        """현재 Head/Worker/geometry를 config.json에 저장"""
+        head = self.headCombo.currentData()
+        workers = [
+            k for k, info in self._workerCheckboxes.items()
+            if info["checkbox"].isChecked()
+        ]
+        g = self.geometry()
+        geoStr = f"{g.width()}x{g.height()}+{g.x()}+{g.y()}"
+        self.configManager.save(head, workers, geometry=geoStr)
 
-    def _clearLog(self):
-        self.logText.configure(state="normal")
-        self.logText.delete("1.0", "end")
-        self.logText.configure(state="disabled")
+    # ── 윈도우 종료 ───────────────────────────────────────────────────────────
+
+    def closeEvent(self, event):
+        """윈도우 닫기 — 실행 중이면 확인 후 설정 저장"""
+        if self._polling:
+            reply = QMessageBox.question(
+                self, "종료 확인",
+                "작업이 진행 중입니다. 종료하시겠습니까?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply == QMessageBox.No:
+                event.ignore()
+                return
+            self._stopEvent.set()
+            self._pollTimer.stop()
+            self._elapsedTimer.stop()
+        self._saveConfig()
+        event.accept()
+
+    # ── QSS 스타일시트 ────────────────────────────────────────────────────────
+
+    def _applyStyles(self):
+        """전체 애플리케이션 QSS 스타일 적용"""
+        self.setStyleSheet(f"""
+            /* ── 전역 기본 ─────────────────────────────────── */
+            * {{
+                font-family: "Apple SD Gothic Neo", "맑은 고딕",
+                             "Noto Sans CJK KR", sans-serif;
+            }}
+            QMainWindow {{
+                background-color: {C["bg"]};
+            }}
+
+            /* ── 사이드바 ──────────────────────────────────── */
+            #sidebar {{
+                background-color: {C["surface"]};
+                border-right: 1px solid {C["border"]};
+            }}
+            #sidebarHeader {{
+                font-size: 18px;
+                font-weight: bold;
+                color: {C["text"]};
+                padding-bottom: 4px;
+            }}
+            #sectionLabel {{
+                font-size: 12px;
+                font-weight: bold;
+                color: {C["text2"]};
+            }}
+            #divider {{
+                color: {C["border"]};
+            }}
+            #disabledHint {{
+                font-size: 11px;
+                color: {C["text3"]};
+            }}
+            #warningLabel {{
+                font-size: 11px;
+                color: {C["warning"]};
+                padding: 4px 0;
+            }}
+
+            /* ── Head LLM 드롭다운 ────────────────────────── */
+            #headCombo {{
+                padding: 8px 12px;
+                border: 1px solid {C["border"]};
+                border-radius: 6px;
+                background: white;
+                font-size: 13px;
+                color: {C["text"]};
+                min-height: 20px;
+            }}
+            #headCombo:focus {{
+                border-color: {C["borderFocus"]};
+            }}
+            #headCombo::drop-down {{
+                border: none;
+                width: 24px;
+            }}
+            #headCombo QAbstractItemView {{
+                border: 1px solid {C["border"]};
+                background: white;
+                selection-background-color: {C["accent"]};
+                selection-color: white;
+                padding: 4px;
+            }}
+
+            /* ── Worker 체크박스 ───────────────────────────── */
+            QCheckBox {{
+                font-size: 13px;
+                color: {C["text"]};
+                spacing: 6px;
+            }}
+            QCheckBox:disabled {{
+                color: {C["text3"]};
+            }}
+
+            /* ── 실행 버튼 ────────────────────────────────── */
+            #runButton {{
+                background-color: {C["accent"]};
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 10px 16px;
+                font-size: 14px;
+                font-weight: bold;
+                min-height: 20px;
+            }}
+            #runButton:hover {{
+                background-color: #0062CC;
+            }}
+            #runButton:disabled {{
+                background-color: #A0C4FF;
+                color: rgba(255, 255, 255, 0.7);
+            }}
+
+            /* ── 중지 버튼 ────────────────────────────────── */
+            #stopButton {{
+                background-color: #E8E9ED;
+                color: {C["text2"]};
+                border: none;
+                border-radius: 6px;
+                padding: 10px 16px;
+                font-size: 14px;
+                min-height: 20px;
+            }}
+            #stopButton:hover {{
+                background-color: #D5D6DA;
+            }}
+            #stopButton:disabled {{
+                color: {C["text3"]};
+            }}
+
+            /* ── 지우기 버튼 (사이드바) ───────────────────── */
+            #clearAllButton {{
+                background-color: #E8E9ED;
+                color: {C["text2"]};
+                border: none;
+                border-radius: 6px;
+                padding: 10px 16px;
+                font-size: 14px;
+                min-height: 20px;
+            }}
+            #clearAllButton:hover {{
+                background-color: #D5D6DA;
+            }}
+
+            /* ── 콘텐츠 영역 ─────────────────────────────── */
+            #contentArea {{
+                background-color: {C["bg"]};
+            }}
+            #contentSectionTitle {{
+                font-size: 15px;
+                font-weight: bold;
+                color: {C["text"]};
+            }}
+            #charCount {{
+                font-size: 12px;
+                color: {C["text3"]};
+            }}
+
+            /* ── 프롬프트 입력 ────────────────────────────── */
+            #promptEdit {{
+                background-color: {C["surface"]};
+                border: 1px solid {C["border"]};
+                border-radius: 8px;
+                padding: 12px;
+                font-size: 13px;
+                color: {C["text"]};
+            }}
+            #promptEdit:focus {{
+                border-color: {C["borderFocus"]};
+            }}
+
+            /* ── 메트릭 카드 ──────────────────────────────── */
+            #metricCard {{
+                background-color: #F8F9FC;
+                border: 1px solid {C["border"]};
+                border-radius: 8px;
+            }}
+            #metricTitle {{
+                font-size: 11px;
+                color: {C["text2"]};
+            }}
+            #metricValue {{
+                font-size: 20px;
+                font-weight: bold;
+                color: {C["text"]};
+            }}
+
+            /* ── 뷰 토글 버튼 ────────────────────────────── */
+            #viewToggle {{
+                border: 1px solid {C["border"]};
+                border-radius: 4px;
+                padding: 4px 12px;
+                font-size: 12px;
+                background: {C["surface"]};
+                color: {C["text2"]};
+            }}
+            #viewToggle:checked {{
+                background: {C["accent"]};
+                color: white;
+                border-color: {C["accent"]};
+            }}
+            #viewToggle:hover {{
+                background: #EEF0F4;
+            }}
+            #viewToggle:checked:hover {{
+                background: #0062CC;
+            }}
+
+            /* ── 종합 결과 카드 ───────────────────────────── */
+            #synthesisCard {{
+                background-color: #EEF5FF;
+                border: 1px solid {C["accent"]};
+                border-radius: 8px;
+            }}
+            #synthesisTitle {{
+                font-size: 14px;
+                font-weight: bold;
+                color: {C["accent"]};
+            }}
+            #synthesisTextEdit {{
+                background: transparent;
+                border: none;
+                font-size: 13px;
+                color: {C["text"]};
+            }}
+
+            /* ── 스크롤 영역 ──────────────────────────────── */
+            #responseScroll {{
+                border: none;
+                background: transparent;
+            }}
+            #cardsContainer {{
+                background: transparent;
+            }}
+
+            /* ── 카드 상태 뱃지 ───────────────────────────── */
+            #cardStatus {{
+                font-size: 11px;
+                padding: 2px 8px;
+                border-radius: 10px;
+            }}
+            #cardStatus[status="waiting"] {{
+                background-color: #E8E9ED;
+                color: {C["text2"]};
+            }}
+            #cardStatus[status="head"] {{
+                background-color: #EEF5FF;
+                color: {C["accent"]};
+            }}
+            #cardStatus[status="running"] {{
+                background-color: #FFF3CD;
+                color: #856404;
+            }}
+            #cardStatus[status="done"] {{
+                background-color: #D4EDDA;
+                color: #155724;
+            }}
+            #cardStatus[status="error"] {{
+                background-color: #F8D7DA;
+                color: #721C24;
+            }}
+
+            /* ── 소형 버튼 (지우기, 복사) ─────────────────── */
+            #smallBtn {{
+                border: 1px solid {C["border"]};
+                border-radius: 4px;
+                padding: 4px 12px;
+                font-size: 12px;
+                background: {C["surface"]};
+                color: {C["text2"]};
+            }}
+            #smallBtn:hover {{
+                background: #D5D6DA;
+            }}
+
+            /* ── 로그 텍스트 ──────────────────────────────── */
+            #logText {{
+                background-color: #F8F9FC;
+                border: 1px solid {C["border"]};
+                border-radius: 8px;
+                padding: 10px;
+                font-size: 12px;
+                font-family: "Menlo", "Consolas", monospace;
+                color: {C["text2"]};
+            }}
+
+            /* ── 스크롤바 ─────────────────────────────────── */
+            QScrollBar:vertical {{
+                border: none;
+                background: transparent;
+                width: 8px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {C["border"]};
+                border-radius: 4px;
+                min-height: 20px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {C["text3"]};
+            }}
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {{
+                height: 0;
+            }}
+            QScrollBar:horizontal {{
+                height: 0;
+            }}
+        """)
